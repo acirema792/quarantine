@@ -15,13 +15,34 @@ BRANCH="${BRANCH:-main}"
 APP_DIR=/opt/quarantine
 DATA_DIR=/var/lib/quarantine
 ENV_FILE=/etc/quarantine.env
-log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+# Progress beacon: until Caddy owns port 80, a tiny static server publishes ONLY step
+# names (and, on failure, a redacted log tail) so a first boot can be watched from a
+# browser without SSH. No secrets are ever written to it.
+BEACON=/run/quarantine-status
+mkdir -p "$BEACON"
+log() {
+  printf '\n\033[1;36m==> %s\033[0m\n' "$*"
+  printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*" >> "$BEACON/index.txt"
+}
+on_error() {
+  local rc=$? line=$1
+  {
+    printf '%s  FAILED (exit %s) at install.sh line %s\n\n--- last log lines (redacted) ---\n' "$(date -u +%H:%M:%S)" "$rc" "$line"
+    tail -n 60 /var/log/quarantine-install.log 2>/dev/null | grep -viE 'token|api_key|apikey|secret|password' || true
+  } >> "$BEACON/index.txt"
+}
+trap 'on_error $LINENO' ERR
 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)"; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 # First boot: unattended-upgrades often holds the dpkg lock; wait for it instead of failing.
 APT="apt-get -o DPkg::Lock::Timeout=900 -y -qq"
 POOL="${SANDBOX_SUBNET_POOL:-10.250}"
+
+if command -v ufw >/dev/null; then ufw allow 80/tcp >/dev/null 2>&1 || true; ufw allow 443/tcp >/dev/null 2>&1 || true; fi
+if ! ss -ltn 2>/dev/null | grep -q ':80 '; then
+  (cd "$BEACON" && nohup python3 -m http.server 80 --bind 0.0.0.0 >/dev/null 2>&1 &)
+fi
 
 log "Base packages"
 $APT update
@@ -53,11 +74,14 @@ PY
 systemctl restart docker
 docker info --format '{{json .Runtimes}}' | grep -q runsc && echo "runsc registered with Docker"
 # gVisor smoke test: must start a container and report the gVisor kernel. Fail loudly.
-if ! docker run --rm --runtime=runsc --network none busybox:1.36 dmesg 2>/dev/null | grep -qi gvisor; then
-  echo "FATAL: runsc did not start a gVisor sandbox. Check: journalctl -u docker -n 50" >&2
+GV_DMESG=$(docker run --rm --runtime=runsc --network none busybox:1.36 dmesg 2>&1 || true)
+GV_UNAME=$(docker run --rm --runtime=runsc --network none busybox:1.36 uname -r 2>&1 || true)
+if echo "$GV_DMESG" | grep -qi gvisor || [ "$GV_UNAME" = "4.4.0" ]; then
+  log "gVisor OK (kernel $GV_UNAME)"
+else
+  log "FATAL: runsc did not start a gVisor sandbox: ${GV_UNAME:0:120}"
   exit 1
 fi
-echo "gVisor OK: $(docker run --rm --runtime=runsc --network none busybox:1.36 dmesg | head -1)"
 
 log "Application code"
 if [ -d "$APP_DIR/.git" ]; then
@@ -137,6 +161,7 @@ systemctl enable --now quarantine
 systemctl restart quarantine
 
 log "Caddy (automatic HTTPS)"
+pkill -f "http.server 80" || true  # hand port 80 to Caddy
 if ! command -v caddy >/dev/null; then
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
