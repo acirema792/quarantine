@@ -13,7 +13,24 @@ const FIXTURE_TITLES = {
   "turbo-build-cache": "Fork bomb and memory hog at install time",
   "left-padder": "Clean control package",
 };
-const DECOYS = ["~/.npmrc", "~/.aws/credentials", "~/.ssh/id_rsa", "~/.config/gh/hosts.yml", "/work/.env"];
+const DECOYS = ["~/.npmrc", "~/.aws/credentials", "~/.ssh/id_rsa", "~/.config/gh/hosts.yml", "~/projects/payments-api/.env"];
+const toMB = (v) => { const m = /^(\d+(?:\.\d+)?)\s*([kmg]?)/i.exec(String(v || "")); if (!m) return 768;
+  const n = parseFloat(m[1]); return Math.round(m[2].toLowerCase() === "g" ? n * 1024 : m[2].toLowerCase() === "k" ? n / 1024 : n); };
+// Build inline content from parts without ever parsing HTML: strings become text nodes,
+// [tag, text] pairs become <tag>text</tag>. Event data comes from untrusted packages.
+function rich(node, ...parts) {
+  for (const p of parts) {
+    if (p === null || p === undefined || p === false) continue;
+    if (Array.isArray(p)) node.append(el(p[0], "", String(p[1])));
+    else node.append(document.createTextNode(String(p)));
+  }
+  return node;
+}
+// Which channel may produce which event types. The sandbox and proxy are untrusted.
+const TRUSTED_SOURCES = { sandbox: "sandbox", proxy: "proxy", engine: "engine", pipeline: "pipeline", vultr: "vultr" };
+const SANDBOX_TYPES = new Set(["runner_start", "decoys_planted", "decoy_read", "proc", "net_attempt", "phase_start",
+  "phase_end", "output", "mcp_tool", "mcp_call", "fs_change", "lingering_killed", "runner_done", "runner_error",
+  "monitor_warning", "telemetry_anomaly", "raw"]);
 let health = null;
 let current = null; // { id, es, state }
 
@@ -39,9 +56,9 @@ async function loadHealth() {
   const box = $("#engine");
   box.textContent = "";
   const a = el("span", e.ok && e.gvisor ? "ok" : "warn");
-  a.innerHTML = e.ok ? `Sandbox: <b>${e.gvisor ? "gVisor (runsc)" : e.runtime}</b>` : "Sandbox engine offline";
+  if (e.ok) rich(a, "Sandbox: ", ["b", e.gvisor ? "gVisor (runsc)" : e.runtime]); else a.textContent = "Sandbox engine offline";
   const b = el("span", inf.configured ? "ok" : "warn");
-  b.innerHTML = inf.configured ? `Vultr Inference: <b>${inf.model || "connecting"}</b>` : "Vultr Inference: <b>not configured</b>";
+  rich(b, "Vultr Inference: ", ["b", inf.configured ? (inf.model || "connecting") : "not configured"]);
   box.append(a, b);
   const notes = [];
   if (!inf.configured) notes.push("Vultr Serverless Inference key is not set, so the analyst falls back to a generic harness and a template report.");
@@ -91,7 +108,7 @@ async function loadStats() {
     box.textContent = "";
     const items = [[s.runs, "packages inspected"], [s.malicious, "caught malicious"],
       [s.decoys_tripped, "decoy credentials read"], [s.egress_blocked, "exfil attempts blocked"],
-      [s.bytes_exfiltrated, "bytes that left the box"]];
+      [s.bytes_exfiltrated, "bytes delivered to an unapproved host"]];
     for (const [v, l] of items) {
       const d = el("div");
       d.append(el("strong", "", String(v ?? 0)), el("span", "", l));
@@ -126,7 +143,8 @@ function resetRunView() {
   d.textContent = "";
   for (const p of DECOYS) { const n = el("span", "decoy", p); n.dataset.p = p; d.append(n); }
   $("#procs").textContent = "";
-  $("#hosts").innerHTML = '<li class="none">No outbound attempts yet</li>';
+  $("#hosts").textContent = "";
+  $("#hosts").append(el("li", "none", "No outbound attempts yet"));
   $("#g-pids").style.width = "0"; $("#g-mem").style.width = "0";
   $("#g-pids-v").textContent = "0"; $("#g-mem-v").textContent = "0 MB";
   $("#leak").textContent = "0";
@@ -140,11 +158,19 @@ function resetRunView() {
 function openRun(id) {
   if (current && current.es) current.es.close();
   resetRunView();
-  current = { id, state: { peakPids: 0, bytesOut: 0, hosts: {}, procs: 0, events: 0 } };
+  current = { id, state: { peakPids: 0, bytesOut: 0, hosts: {}, procs: 0, events: 0, lastSeq: -1 } };
   loadHistory();
   const es = new EventSource(`/api/runs/${id}/events`);
   current.es = es;
-  es.onmessage = (m) => handle(JSON.parse(m.data));
+  es.onmessage = (m) => {
+    const ev = JSON.parse(m.data);
+    if (typeof ev.seq !== "number" || ev.seq <= current.state.lastSeq) return; // dedupe on reconnect
+    current.state.lastSeq = ev.seq;
+    if (ev.source === "sandbox" && !SANDBOX_TYPES.has(ev.type)) return;
+    if (ev.source === "proxy" && ev.type !== "egress") return;
+    if (!(ev.source in TRUSTED_SOURCES)) return;
+    handle(ev);
+  };
   es.addEventListener("end", async () => { es.close(); await finish(id); });
   es.onerror = () => { /* EventSource retries on its own */ };
 }
@@ -174,10 +200,11 @@ function handle(ev) {
       const t = $("#target");
       t.textContent = "";
       t.append(el("h1", "", `${ev.name}@${ev.version}`));
-      const m = el("div", "meta");
-      m.innerHTML = `${ev.ecosystem} package from ${ev.source === "fixture" ? "the sample shipments" : "the public registry"}` +
-        `${ev.is_mcp_server ? ", MCP server" : ""}. sha256 <code>${ev.sha256.slice(0, 16)}…</code>` +
-        (ev.integrity_ok === true ? ", registry integrity verified" : "");
+      if (ev.source !== "pipeline") break;
+      const m = rich(el("div", "meta"),
+        `${ev.ecosystem} package from ${ev.origin === "fixture" ? "the sample shipments" : "the public registry"}`,
+        ev.is_mcp_server ? ", MCP server" : "", ". sha256 ", ["code", `${String(ev.sha256).slice(0, 16)}…`],
+        ev.integrity_ok === true ? ", registry integrity verified" : "");
       t.append(m);
       logLine(ev, `target ${ev.ecosystem}:${ev.name}@${ev.version} sha256=${ev.sha256.slice(0, 12)}…`);
       break;
@@ -187,7 +214,7 @@ function handle(ev) {
       break;
     case "llm_call":
       $("#plan-panel").hidden = false;
-      addAgentLine(`Vultr Inference call for the ${ev.purpose}: <b>${ev.model}</b>, ${ev.latency_s}s, ${(ev.prompt_tokens || 0) + (ev.completion_tokens || 0)} tokens`);
+      addAgentLine(`Vultr Inference call for the ${ev.purpose}: `, ["b", ev.model], `, ${ev.latency_s}s, ${(ev.prompt_tokens || 0) + (ev.completion_tokens || 0)} tokens`);
       logLine(ev, `vultr inference ${ev.purpose} model=${ev.model} ${ev.latency_s}s`);
       break;
     case "llm_offline":
@@ -198,14 +225,16 @@ function handle(ev) {
       break;
     case "agent_tool":
       $("#plan-panel").hidden = false;
-      addAgentLine(`Analyst used <b>${ev.tool}</b>${ev.args && ev.args.path ? " on " + escapeHtml(ev.args.path) : ev.args && ev.args.pattern ? " for /" + escapeHtml(ev.args.pattern) + "/" : ""}`);
+      addAgentLine("Analyst used ", ["b", ev.tool], ev.args && ev.args.path ? ` on ${ev.args.path}` : ev.args && ev.args.pattern ? ` for /${ev.args.pattern}/` : "");
       logLine(ev, `agent tool ${ev.tool} ${JSON.stringify(ev.args || {})}`);
       break;
     case "agent_plan":
       renderPlan(ev);
-      logLine(ev, `harness ready (${ev.harness_language}, sha256 ${ev.harness_sha256.slice(0, 12)}…, ${ev.source})`);
+      logLine(ev, `harness ready (${ev.harness_language}, sha256 ${String(ev.harness_sha256).slice(0, 12)}…, ${ev.harness_source})`);
       break;
     case "lifecycle":
+      if (ev.source !== "engine") break;
+      if (ev.action === "registry_locked") $("#allowlist").textContent = "allowlist: none (locked after install)";
       if (ev.action === "sandbox_started") { $("#life").textContent = `Sandbox ${ev.name} running`; $("#ch-runtime").textContent = ev.runtime === "runsc" ? "gVisor runsc" : ev.runtime; }
       if (ev.action === "proxy_started") $("#allowlist").textContent = "allowlist: " + (ev.allow || []).join(", ");
       if (ev.action === "teardown") {
@@ -217,7 +246,7 @@ function handle(ev) {
       logLine(ev, `${ev.action}${ev.name ? " " + ev.name : ""}`);
       break;
     case "containment":
-      renderProof(ev.proof);
+      if (ev.source === "engine") renderProof(ev.proof);
       break;
     case "decoy_read": {
       const short = ev.path.replace("/home/dev", "~");
@@ -241,7 +270,7 @@ function handle(ev) {
       s.peakPids = Math.max(s.peakPids, ev.peak_pids || 0);
       s.peakMem = Math.max(s.peakMem || 0, ev.peak_mem_mb || 0);
       const pidPct = Math.min(100, (s.peakPids / limits.pids) * 100);
-      const memLimit = parseInt(limits.memory, 10) || 768;
+      const memLimit = toMB(limits.memory);
       const memPct = Math.min(100, (s.peakMem / memLimit) * 100);
       $("#g-pids").style.width = pidPct + "%"; $("#g-pids").classList.toggle("hot", pidPct > 80);
       $("#g-mem").style.width = memPct + "%"; $("#g-mem").classList.toggle("hot", memPct > 80);
@@ -255,6 +284,7 @@ function handle(ev) {
       logLine(ev, `egress ${ev.verdict} ${ev.method} ${ev.host}:${ev.port}${ev.canary_hit && ev.canary_hit.length ? " carrying decoy secrets" : ""}`, ev.verdict === "DENY");
       break;
     case "net_attempt":
+      if (String(ev.dst).endsWith(":3128")) break; // the sandbox talking to its own proxy
       addHost({ verdict: "DENY", host: ev.dst, method: "TCP", reason: "no route (direct socket)", canary_hit: [] });
       logLine(ev, `direct connection attempt ${ev.dst}`, true);
       break;
@@ -281,24 +311,22 @@ function handle(ev) {
       logLine(ev, `ERROR ${ev.error}`, true);
       break;
     default:
-      if (!["runner_start", "decoys_planted", "runner_done", "assessment", "explanation", "receipt", "run_done", "raw", "lingering_killed"].includes(ev.type)) {
-        logLine(ev, ev.type);
+      if (ev.type === "telemetry_anomaly" || ev.type === "telemetry_truncated") {
+        logLine(ev, `TELEMETRY ${ev.type === "telemetry_truncated" ? "flood truncated" : ev.detail}`, true);
+      } else if (ev.type === "registry_locked") {
+        logLine(ev, "registry access locked: install finished");
+      } else if (!["runner_start", "decoys_planted", "runner_done", "assessment", "explanation", "receipt", "run_done", "raw", "lingering_killed"].includes(ev.type)) {
+        logLine(ev, String(ev.type));
       } else if (ev.type === "decoys_planted") {
-        logLine(ev, `decoy credentials planted: ${ev.files.length} files`);
+        logLine(ev, `decoy credentials planted: ${(ev.files || []).length} files`);
       } else if (ev.type === "runner_start") {
-        logLine(ev, `runner up as uid ${ev.uid}; real secrets in env: ${ev.secret_env.length ? ev.secret_env.join(",") : "none"}`);
+        logLine(ev, `runner up as uid ${ev.uid}, package code as uid ${ev.package_uid}; real secrets in env: ${(ev.secret_env || []).length ? ev.secret_env.join(",") : "none"}`);
       }
   }
 }
 
-function addAgentLine(html) {
-  const d = el("div", "a");
-  d.innerHTML = html;
-  $("#agent-log").append(d);
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function addAgentLine(...parts) {
+  $("#agent-log").append(rich(el("div", "a"), ...parts));
 }
 
 function addHost(ev) {
@@ -318,9 +346,11 @@ function addHost(ev) {
   }
   li.dataset.n = String(+li.dataset.n + 1);
   const d = li.querySelector(".d");
-  d.innerHTML = `${ev.method} ×${li.dataset.n}${ev.verdict === "ALLOW" ? `, ${ev.bytes_out || 0} B out` : ""}` +
-    (hit || li.dataset.hit ? ` <b>carrying decoy credentials</b>` : "");
   if (hit) li.dataset.hit = "1";
+  d.textContent = "";
+  const why = ev.reason === "registry_locked_after_install" ? ", after install (locked)" : "";
+  rich(d, `${ev.method} ×${li.dataset.n}${ev.verdict === "ALLOW" ? `, ${ev.bytes_out || 0} B out` : why}`,
+    li.dataset.hit ? " " : "", li.dataset.hit ? ["b", "carrying decoy credentials"] : "");
   if (ev.verdict === "DENY") {
     s.bytesOut += ev.bytes_out || 0;
     $("#leak").textContent = String(s.bytesOut);
@@ -332,23 +362,24 @@ function addHost(ev) {
 function renderProof(p) {
   const ul = $("#proof");
   ul.textContent = "";
+  const caps = (p.cap_add || []).join(", ") || "none";
   const rows = [
-    [p.gvisor, `Isolation runtime: <code>${p.runtime}</code>${p.gvisor ? " (gVisor user-space kernel)" : " (gVisor not installed on this host)"}`],
-    [p.network_internal, `Network <code>${p.network}</code> is internal: no route out except the egress proxy`],
-    [p.real_secrets_in_env.length === 0, `No real secrets in the sandbox env (${p.env_keys.length} vars, decoys only)`],
-    [p.readonly_rootfs, "Read-only root filesystem, tmpfs scratch space with size caps"],
-    [p.user && !p.user.startsWith("0"), `Non-root user <code>${p.user}</code>`],
-    [(p.cap_drop || []).includes("ALL") && !p.privileged, "All Linux capabilities dropped, not privileged"],
-    [(p.security_opt || []).some((x) => x.includes("no-new-privileges")), "<code>no-new-privileges</code> set"],
-    [p.memory_mb > 0 && p.memory_mb === p.memory_swap_mb, `Memory capped at ${p.memory_mb} MB, no swap`],
-    [p.cpus > 0, `CPU capped at ${p.cpus} core`],
-    [p.pids_limit > 0, `Process limit ${p.pids_limit}`],
-    [p.host_firewall, p.host_firewall ? "Host firewall drops sandbox traffic to the VM itself (sshd, web server)" : "Host firewall rule missing: the sandbox can reach the VM's own ports"],
-    [!p.docker_socket_mounted, "Docker socket not mounted; only <code>/job</code> mounted read-only"],
+    [p.gvisor, ["Isolation runtime: ", ["code", p.runtime], p.gvisor ? " (gVisor user-space kernel)" : " (gVisor not installed on this host)"]],
+    [p.network_internal, ["Network ", ["code", p.network], " is internal: no route out except the egress proxy"]],
+    [(p.real_secrets_in_env || []).length === 0, [`No real secrets in the sandbox env (${(p.env_keys || []).length} vars, decoys only)`]],
+    [p.readonly_rootfs, ["Read-only root filesystem, tmpfs scratch space with size caps"]],
+    [p.package_uid > 0, ["Package code runs as uid ", ["code", String(p.package_uid)], " with zero capabilities; the telemetry runner is a different uid it cannot signal or forge"]],
+    [(p.cap_drop || []).includes("ALL") && !p.privileged, ["All capabilities dropped; the runner keeps only ", ["code", caps]]],
+    [(p.security_opt || []).some((x) => x.includes("no-new-privileges")), [["code", "no-new-privileges"], " set"]],
+    [p.memory_mb > 0 && p.memory_mb === p.memory_swap_mb, [`Memory capped at ${p.memory_mb} MB, no swap`]],
+    [p.cpus > 0, [`CPU capped at ${p.cpus} core`]],
+    [p.pids_limit > 0, [`Process limit ${p.pids_limit}`]],
+    [p.host_firewall, [p.host_firewall ? "Host firewall drops sandbox traffic to the VM itself (sshd, web server)" : "Host firewall rule missing: the sandbox can reach the VM's own ports"]],
+    [!p.docker_socket_mounted, ["Docker socket not mounted; only ", ["code", "/job"], " mounted read-only"]],
   ];
-  for (const [ok, html] of rows) {
+  for (const [ok, parts] of rows) {
     const li = el("li", ok ? "" : "bad");
-    li.innerHTML = `<span>${html}</span>`;
+    li.append(rich(el("span"), ...parts));
     ul.append(li);
   }
   $("#proof-panel").hidden = false;
@@ -369,7 +400,8 @@ function renderPlan(ev) {
   }
   box.append(meta);
   const head = el("div", "code-head");
-  head.append(el("span", "", `Exercise harness written by ${ev.source === "heuristic" ? "the fallback template" : "the model"} (${ev.harness_language})`),
+  const hs = ev.harness_source || "";
+  head.append(el("span", "", `Exercise harness written by ${hs.startsWith("vultr") ? `the model${hs.includes("healed") ? ", healed after a crash" : ""}` : "the fallback template (no inference key)"} (${ev.harness_language})`),
     el("code", "", `sha256 ${ev.harness_sha256.slice(0, 16)}…`));
   const pre = el("pre", "code", ev.harness_code);
   box.append(head, pre);
@@ -422,14 +454,39 @@ function policyText(p) {
   return p.decision === "allow" ? `Approved: the install gate now allows ${p.name}@${p.version}.` : `Blocked: the install gate now refuses ${p.name}@${p.version}.`;
 }
 
+function adminToken() {
+  try { return sessionStorage.getItem("q-admin") || ""; } catch (e) { return ""; }
+}
+
 async function decideRun(id, decision, state) {
+  const send = () => api(`/api/runs/${id}/decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Token": adminToken() },
+    body: JSON.stringify({ decision }),
+  });
   try {
-    const r = await api(`/api/runs/${id}/decision`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }),
-    });
+    const r = await send();
     state.textContent = policyText(r.policy);
   } catch (e) {
-    state.textContent = `Could not save the decision: ${e.message}`;
+    if (String(e.message).includes("admin token")) {
+      state.textContent = "";
+      const f = el("form", "token-form");
+      const inp = el("input");
+      inp.type = "password"; inp.placeholder = "Admin token"; inp.autocomplete = "off";
+      inp.setAttribute("aria-label", "Admin token");
+      const b = el("button", "ghost", "Save decision");
+      b.type = "submit";
+      f.append(el("span", "", "Setting policy for a real package needs the admin token. "), inp, b);
+      f.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        try { sessionStorage.setItem("q-admin", inp.value); } catch (err) { /* private mode */ }
+        try { state.textContent = policyText((await send()).policy); } catch (err) { state.textContent = `Could not save the decision: ${err.message}`; }
+      });
+      state.append(f);
+      inp.focus();
+    } else {
+      state.textContent = `Could not save the decision: ${e.message}`;
+    }
   }
 }
 

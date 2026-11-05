@@ -11,6 +11,13 @@ Phases:  plant decoys -> install (lifecycle scripts run) -> exercise harness
          -> MCP probe (optional) -> summary
 
 Every event is one JSON line on stdout prefixed with {"q":1,...}.
+
+Privilege split: the runner is uid 0 inside the sandbox with ONLY the SETUID,
+SETGID, KILL and DAC_READ_SEARCH capabilities (all others dropped by Docker,
+no-new-privileges set). Every piece of package code runs as uid 10001 with an
+empty capability set. Different uid => the package cannot signal the runner,
+open /proc/<runner>/fd/1 to forge telemetry, or read the job file; it can only
+write to the pipes the runner gives it, and those are parsed as plain output.
 """
 import ctypes
 import ctypes.util
@@ -23,6 +30,7 @@ import sys
 import threading
 import time
 
+DEV_UID = DEV_GID = 10001
 JOB_PATH = os.environ.get("Q_JOB", "/job/job.json")
 HOME = os.environ.get("HOME", "/home/dev")
 WORK = "/work"
@@ -62,18 +70,39 @@ def plant_decoys(tokens):
         f"{HOME}/.config/gh/hosts.yml": (
             f"github.com:\n    oauth_token: {tokens['github']}\n    user: dev\n"
         ),
-        f"{WORK}/.env": f"OPENAI_API_KEY={tokens['openai']}\nDATABASE_URL=postgres://app:{tokens['db']}@db:5432/prod\n",
+        # A sibling project's secrets, NOT the harness cwd: dotenv-style libraries
+        # legitimately read ./.env, so a decoy there would flag honest packages.
+        f"{HOME}/projects/payments-api/.env": (
+            f"OPENAI_API_KEY={tokens['openai']}\nDATABASE_URL=postgres://app:{tokens['db']}@db:5432/prod\n"),
     }
-    for path, content in files.items():
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
-            fh.write(content)
-        os.chmod(path, 0o600)
-    # An empty npm userconfig so npm itself never touches the decoy ~/.npmrc
-    with open("/tmp/npmrc-empty", "w") as fh:
-        fh.write("")
-    emit("decoys_planted", files=sorted(files.keys()))
+    pid = os.fork()
+    if pid == 0:  # child: become the dev user, write the files, exit
+        try:
+            drop_privileges()
+            for path, content in files.items():
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as fh:
+                    fh.write(content)
+                os.chmod(path, 0o600)
+            with open("/tmp/npmrc-empty", "w") as fh:  # npm itself never reads the decoy ~/.npmrc
+                fh.write("")
+            os.makedirs(WORK, exist_ok=True)
+            with open(f"{WORK}/package.json", "w") as fh:  # a host project for `npm install`
+                json.dump({"name": "quarantine-host-project", "version": "1.0.0", "private": True}, fh)
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    emit("decoys_planted", files=sorted(files.keys()), ok=status == 0)
     return list(files.keys())
+
+
+def drop_privileges():
+    """Irrevocably become uid/gid 10001 with no supplementary groups and no capabilities."""
+    if os.getuid() == 0:
+        os.setgroups([])
+        os.setgid(DEV_GID)
+        os.setuid(DEV_UID)
 
 
 # --------------------------------------------------------------------------
@@ -244,6 +273,7 @@ def _run_phase(name, argv, timeout, cwd=WORK, env=None, stdin_data=None):
         proc = subprocess.Popen(
             argv, cwd=cwd, env=env, stdin=subprocess.PIPE if stdin_data else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+            preexec_fn=drop_privileges, umask=0o022,
         )
     except OSError as exc:
         emit("phase_end", phase=name, exit_code=None, error=str(exc), seconds=0)
@@ -340,7 +370,7 @@ def _mcp_probe(command, env, timeout):
     try:
         proc = subprocess.Popen(command, cwd=WORK, env=env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                start_new_session=True)
+                                start_new_session=True, preexec_fn=drop_privileges, umask=0o022)
     except OSError as exc:
         emit("phase_end", phase="mcp", exit_code=None, error=str(exc), seconds=0)
         return {"error": str(exc)}
@@ -420,9 +450,9 @@ def _mcp_probe(command, env, timeout):
 def main():
     with open(JOB_PATH) as fh:
         job = json.load(fh)
-    emit("runner_start", run_id=job.get("run_id"), uid=os.getuid(), hostname=os.uname().nodename,
+    emit("runner_start", run_id=job.get("run_id"), uid=os.getuid(), package_uid=DEV_UID,
+         hostname=os.uname().nodename,
          secret_env=[k for k in os.environ if "VULTR" in k or k.endswith("_API_KEY")])
-    os.makedirs(WORK, exist_ok=True)
     decoy_paths = plant_decoys(job["decoys"])
 
     stop = threading.Event()
@@ -434,7 +464,7 @@ def main():
     proxy = job.get("proxy_url", "")
     base_env = {
         "HOME": HOME, "USER": "dev", "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "LANG": "C.UTF-8", "CI": "true",
+        "LANG": "C.UTF-8",
         "HTTP_PROXY": proxy, "HTTPS_PROXY": proxy, "http_proxy": proxy, "https_proxy": proxy,
         "NO_PROXY": "", "no_proxy": "",
         # Decoy credentials in env too: real malware (Shai-Hulud, s1ngularity) harvests both.
@@ -445,8 +475,6 @@ def main():
     eco = job["ecosystem"]
     t = job.get("timeouts", {})
     if eco == "npm":
-        with open(f"{WORK}/package.json", "w") as fh:
-            json.dump({"name": "quarantine-host-project", "version": "1.0.0", "private": True}, fh)
         env = dict(base_env, NPM_CONFIG_USERCONFIG="/tmp/npmrc-empty", npm_config_cache=f"{HOME}/.npm",
                    NODE_PATH=f"{WORK}/node_modules",
                    npm_config_update_notifier="false", npm_config_proxy=proxy, npm_config_https_proxy=proxy)

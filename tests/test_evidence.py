@@ -12,9 +12,36 @@ def test_clean_when_nothing_happens():
     assert a["verdict"] == "CLEAN" and a["score"] == 0 and a["metrics"]["bytes_exfiltrated"] == 0
 
 
-def test_decoy_read_is_malicious_but_setup_reads_are_ignored():
-    assert assess([{"type": "decoy_read", "path": "/home/dev/.npmrc", "phase": "install"}])["verdict"] == "MALICIOUS"
-    assert assess([{"type": "decoy_read", "path": "/home/dev/.npmrc", "phase": "init"}])["verdict"] == "CLEAN"
+def _read(p, phase="install"):
+    return {"type": "decoy_read", "path": f"/home/dev/{p}", "phase": phase}
+
+
+def test_single_decoy_read_is_suspicious_not_malicious():
+    """An AWS SDK reads ~/.aws/credentials when called: flag it, don't convict it."""
+    assert assess([_read(".aws/credentials")])["verdict"] == "SUSPICIOUS"
+    assert assess([_read(".npmrc", phase="init")])["verdict"] == "CLEAN"
+
+
+def test_credential_sweep_is_malicious():
+    a = assess([_read(".npmrc"), _read(".aws/credentials"), _read(".ssh/id_rsa")])
+    assert a["verdict"] == "MALICIOUS"
+
+
+def test_read_then_phone_home_is_malicious():
+    deny = {"type": "egress", "verdict": "DENY", "host": "x.example", "canary_hit": []}
+    assert assess([_read(".aws/credentials"), deny])["verdict"] == "MALICIOUS"
+
+
+def test_missing_runner_summary_is_tampering():
+    a = assess([{"type": "runner_start", "attempt": 1}])
+    assert any(s["kind"] == "telemetry_tampering" for s in a["signals"]) and a["verdict"] != "CLEAN"
+
+
+def test_registry_use_after_install_and_big_uploads_are_flagged():
+    evs = [{"type": "egress", "verdict": "DENY", "host": "registry.npmjs.org", "reason": "registry_locked_after_install"},
+           {"type": "egress", "verdict": "ALLOW", "host": "registry.npmjs.org", "bytes_out": 900_000}]
+    kinds = {s["kind"] for s in assess(evs)["signals"]}
+    assert {"registry_after_install", "registry_upload"} <= kinds
 
 
 def test_exfil_with_canary_is_critical_and_counts_zero_bytes():

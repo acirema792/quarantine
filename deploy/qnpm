@@ -14,9 +14,12 @@ shift
 json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 for spec in "$@"; do
   case "$spec" in -*) continue;; esac
-  name="${spec%@*}"; ver=""
-  [ "$name" != "$spec" ] && [ -n "$name" ] && ver="${spec##*@}"
-  [ -z "$name" ] && name="$spec"
+  name="${spec%@*}"
+  [ -z "$name" ] && name="$spec"   # scoped name without a version: @scope/pkg
+  # Decisions are per exact version: resolve ranges and dist-tags the way npm would.
+  ver=$(npm view "$spec" version --json 2>/dev/null | python3 -c "import json,sys; v=json.load(sys.stdin); print(v[-1] if isinstance(v,list) else v)")
+  [ -n "$ver" ] || { echo "quarantine: cannot resolve $spec" >&2; exit 1; }
+  spec="$name@$ver"
   gate=$(curl -fsS "$Q/api/gate?ecosystem=npm&name=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$name")&version=$ver")
   decision=$(echo "$gate" | json 'd["decision"]')
   if [ "$decision" = "block" ]; then echo "quarantine: $spec is BLOCKED by policy" >&2; exit 1; fi

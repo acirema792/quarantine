@@ -66,9 +66,9 @@ def add_event(run_id, seq, ts, source, etype, data, h):
       (run_id, seq, ts, source, etype, json.dumps(data, default=str), h))
 
 
-def events(run_id, after=-1):
-    rows = q("SELECT seq, ts, source, type, data, hash FROM events WHERE run_id=? AND seq>? ORDER BY seq",
-             (run_id, after))
+def events(run_id, after=-1, limit=100000):
+    rows = q("SELECT seq, ts, source, type, data, hash FROM events WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?",
+             (run_id, after, limit))
     for r in rows:
         r["data"] = json.loads(r["data"])
     return rows
