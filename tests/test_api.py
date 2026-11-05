@@ -114,8 +114,8 @@ def test_fixture_decisions_never_touch_real_policy(client):
     assert g["decision"] == "unknown"
 
 
-def test_public_deployment_without_admin_token_refuses_real_decisions(client, monkeypatch):
+def test_no_admin_token_refuses_real_decisions(client, monkeypatch):
     monkeypatch.setattr(settings, "admin_token", "")
-    monkeypatch.setattr(settings, "public_url", "https://demo.example")
+    monkeypatch.setattr(settings, "allow_open_decisions", False)
     rid = fake_done_run(source="registry", name="pub-pkg")
     assert client.post(f"/api/runs/{rid}/decision", json={"decision": "approve"}).status_code == 403

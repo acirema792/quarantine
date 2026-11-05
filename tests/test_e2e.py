@@ -110,3 +110,11 @@ def test_telemetry_channel_cannot_be_forged_killed_or_flooded():
 def test_honest_sdk_reading_aws_credentials_is_not_convicted():
     r, _ = run_spec("fixture:aws-sdk-like")
     assert r["report"]["assessment"]["verdict"] in ("CLEAN", "SUSPICIOUS")
+
+
+def test_host_firewall_is_measured_not_assumed():
+    """From a container on a sandbox-pool network, the VM's own ports must be unreachable."""
+    from app import sandbox
+    r = sandbox.probe_host_firewall()
+    assert r["active"], r
+    assert set(r["probe"]["ports"].values()) <= {"timeout", "unreachable"}

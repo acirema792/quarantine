@@ -64,8 +64,69 @@ def _fw_rule():
     return ["INPUT", "-s", f"{settings.subnet_pool}.0.0/16", "-j", "DROP"]
 
 
+_PROBE = {"result": None}
+PROBE_SCRIPT = r"""
+import json, socket
+import fcntl, struct  # internal networks have no default route: probe the .1 of our /24 (the host)
+def my_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    for name in (b'eth0',):
+        try:
+            return socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, struct.pack('256s', name))[20:24])
+        except OSError:
+            pass
+host = my_ip().rsplit('.', 1)[0] + '.1'
+out = {}
+for port in (22, 80, 443, 8000):
+    c = socket.socket(); c.settimeout(1.5)
+    try:
+        c.connect((host, port)); out[port] = 'open'
+    except socket.timeout:
+        out[port] = 'timeout'
+    except OSError as e:
+        out[port] = 'refused' if e.errno == 111 else 'unreachable'
+    finally:
+        c.close()
+print(json.dumps({'host': host, 'ports': out}))
+"""
+
+
+def probe_host_firewall():
+    """Measure, don't assume: from a throwaway container on a sandbox-pool network, try to
+    reach the VM's own address. Every port must time out (DROP); 'refused' or 'open' means
+    packets reached the host's TCP stack, i.e. the firewall rule is missing."""
+    c = client()
+    labels = {LABEL: "firewall-probe"}
+    net = box = None
+    try:
+        net = _create_network(c, "fwprobe" + new_run_id()[:5], labels)
+        box = c.containers.run(settings.proxy_image, entrypoint=["python3", "-c", PROBE_SCRIPT], detach=True,
+                               network=net.name, labels=labels, read_only=True, cap_drop=["ALL"],
+                               security_opt=["no-new-privileges"], mem_limit="64m", pids_limit=16,
+                               runtime=resolve_runtime())
+        box.wait(timeout=30)
+        data = json.loads(box.logs(stdout=True, stderr=False).decode().strip().splitlines()[-1])
+        ok = all(v in ("timeout", "unreachable") for v in data["ports"].values())
+        _PROBE["result"] = {"active": ok, "probe": data, "checked_at": time.time(), "via": "reachability probe"}
+    except Exception as exc:
+        _PROBE["result"] = {"active": False, "reason": f"probe failed: {str(exc)[:160]}"}
+    finally:
+        for obj in (box, net):
+            try:
+                if obj is box and obj is not None:
+                    obj.remove(force=True)
+                elif obj is not None:
+                    obj.remove()
+            except Exception:
+                pass
+    return _PROBE["result"]
+
+
 def host_firewall(ensure=False):
-    """Sandbox subnets may talk to their proxy (bridged) but never to the host's own IPs."""
+    """Sandbox subnets may talk to their proxy (bridged) but never to the host's own IPs.
+    The startup reachability probe is the source of truth when it has run."""
+    if _PROBE["result"] is not None and not ensure:
+        return _PROBE["result"]
     marker = Path("/run/quarantine/firewall.ok")
     ipt = shutil.which("iptables") or ("/usr/sbin/iptables" if Path("/usr/sbin/iptables").exists() else None)
     if os.geteuid() != 0 or not ipt:

@@ -46,7 +46,10 @@ def _startup():
     except Exception as exc:  # docker unavailable: health endpoint reports it
         print(f"[quarantine] docker not reachable: {exc}")
     if settings.manage_firewall:
-        print(f"[quarantine] host firewall: {sandbox.host_firewall(ensure=True)}")
+        print(f"[quarantine] host firewall rule: {sandbox.host_firewall(ensure=True)}")
+    import threading
+    threading.Thread(target=lambda: print(f"[quarantine] firewall probe: {sandbox.probe_host_firewall()}"),
+                     daemon=True).start()
     # mark runs interrupted by a restart
     for r in store.q("SELECT id FROM runs WHERE status IN ('queued','running')"):
         store.update_run(r["id"], status="error", report={"error": "interrupted by restart"})
@@ -201,8 +204,8 @@ def decide(run_id: str, body: DecisionIn, req: Request):
     # Policy for real packages is an admin decision. Sample shipments stay open so anyone
     # can try the approval flow on the public demo without touching real policy.
     if not is_fixture:
-        if not settings.admin_token and settings.public_url:
-            raise HTTPException(403, "admin token required: set ADMIN_TOKEN on public deployments")
+        if not settings.admin_token and not settings.allow_open_decisions:
+            raise HTTPException(403, "admin token required: set ADMIN_TOKEN (or ALLOW_OPEN_DECISIONS=1 for local dev)")
         if settings.admin_token and not hmac.compare_digest(
                 req.headers.get("x-admin-token", ""), settings.admin_token):
             raise HTTPException(403, "admin token required to set policy for real packages")

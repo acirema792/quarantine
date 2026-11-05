@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# qnpm — npm install, but every new package clears Quarantine customs first.
+# qnpm — npm install, but every package clears Quarantine customs first.
 # Put it on PATH (or alias npm=qnpm) for developers, CI jobs and coding agents.
 #
 #   QUARANTINE_URL=https://your-quarantine.example qnpm install left-pad@1.3.0
+#   QUARANTINE_URL=...                               qnpm ci
 #
-# allow   -> runs the real npm install
-# block   -> refuses
-# unknown -> submits a scan, waits for the verdict, installs only if CLEAN
+# install <pkg…>  each spec is resolved to an exact version, then:
+#                 allow   -> the registry must still serve the approved bytes (sha512 integrity)
+#                 block   -> refuse
+#                 unknown -> detonate now; install only if CLEAN
+#                 and npm installs exactly the name@version that was checked.
+# ci / install    (no package args) every entry in package-lock.json (v2/v3) must be
+#                 approved, carry an integrity that matches the approval, and resolve
+#                 from registry.npmjs.org. Anything else is refused.
 set -euo pipefail
 Q="${QUARANTINE_URL:?set QUARANTINE_URL}"
 case "${1:-}" in
@@ -14,57 +20,73 @@ case "${1:-}" in
   *) exec npm "$@" ;;
 esac
 cmd="$1"; shift
-pkgs=0; for a in "$@"; do case "$a" in -*) ;; *) pkgs=$((pkgs+1));; esac; done
-if [ "$cmd" = "ci" ] || [ "$pkgs" = 0 ]; then
-  # Installing from a lockfile: every pinned package must already be approved.
-  [ -f package-lock.json ] || { echo "quarantine: no package-lock.json; run qnpm install <pkg>" >&2; exit 1; }
-  missing=$(python3 - "$Q" <<'PY'
+json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+
+flags=(); specs=()
+for a in "$@"; do case "$a" in -*) flags+=("$a");; *) specs+=("$a");; esac; done
+
+if [ "$cmd" = "ci" ] || [ "${#specs[@]}" = 0 ]; then
+  [ -f package-lock.json ] || { echo "quarantine: no package-lock.json; use qnpm install <pkg>" >&2; exit 1; }
+  problems=$(python3 - "$Q" <<'PY'
 import json, sys, urllib.parse, urllib.request
 q = sys.argv[1]
 lock = json.load(open("package-lock.json"))
+if lock.get("lockfileVersion", 1) < 2 or "packages" not in lock:
+    print("lockfile v1 is not supported: regenerate with npm >= 7"); sys.exit()
 bad = []
-for path, meta in (lock.get("packages") or {}).items():
-    if not path or not meta.get("version"):
-        continue
-    name = path.split("node_modules/")[-1]
-    url = f"{q}/api/gate?ecosystem=npm&name={urllib.parse.quote(name)}&version={urllib.parse.quote(meta['version'])}"
+for path, meta in lock["packages"].items():
+    if not path:
+        continue  # the root project itself
+    if meta.get("link") or meta.get("inBundle"):
+        bad.append(f"{path}: linked/bundled dependency not allowed"); continue
+    # aliases (npm:real@ver) and nested paths: the package's real name is meta["name"] when present
+    name = meta.get("name") or path.split("node_modules/")[-1]
+    ver, integ, resolved = meta.get("version"), meta.get("integrity"), meta.get("resolved", "")
+    if not ver or not integ:
+        bad.append(f"{name}: missing version or integrity"); continue
+    if not resolved.startswith("https://registry.npmjs.org/"):
+        bad.append(f"{name}@{ver}: resolves outside registry.npmjs.org ({resolved[:60]})"); continue
+    url = f"{q}/api/gate?ecosystem=npm&name={urllib.parse.quote(name)}&version={urllib.parse.quote(ver)}"
     d = json.load(urllib.request.urlopen(url, timeout=20))
-    if d.get("decision") != "allow" or (d.get("integrity") and meta.get("integrity") and d["integrity"] != meta["integrity"]):
-        bad.append(f"{name}@{meta['version']} ({d.get('decision')})")
+    if d.get("decision") != "allow":
+        bad.append(f"{name}@{ver}: {d.get('decision')}")
+    elif d.get("integrity") != integ:
+        bad.append(f"{name}@{ver}: integrity differs from the approved bytes")
 print("\n".join(bad))
 PY
 )
-  if [ -n "$missing" ]; then echo "quarantine: not cleared:" >&2; echo "$missing" | sed 's/^/  /' >&2; exit 1; fi
-  exec npm "$cmd" "$@"
+  if [ -n "$problems" ]; then echo "quarantine: lockfile not cleared:" >&2; echo "$problems" | sed 's/^/  /' >&2; exit 1; fi
+  exec npm "$cmd" "${flags[@]}"
 fi
-json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
-for spec in "$@"; do
-  case "$spec" in -*) continue;; esac
+
+exact=()
+for spec in "${specs[@]}"; do
   name="${spec%@*}"
   [ -z "$name" ] && name="$spec"   # scoped name without a version: @scope/pkg
   # Decisions are per exact version: resolve ranges and dist-tags the way npm would.
   ver=$(npm view "$spec" version --json 2>/dev/null | python3 -c "import json,sys; v=json.load(sys.stdin); print(v[-1] if isinstance(v,list) else v)")
   [ -n "$ver" ] || { echo "quarantine: cannot resolve $spec" >&2; exit 1; }
-  spec="$name@$ver"
+  pinned="$name@$ver"
   gate=$(curl -fsS "$Q/api/gate?ecosystem=npm&name=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$name")&version=$ver")
   decision=$(echo "$gate" | json 'd["decision"]')
-  if [ "$decision" = "block" ]; then echo "quarantine: $spec is BLOCKED by policy" >&2; exit 1; fi
+  if [ "$decision" = "block" ]; then echo "quarantine: $pinned is BLOCKED by policy" >&2; exit 1; fi
   if [ "$decision" = "allow" ]; then
     # The approval is for specific bytes: make sure the registry still serves those bytes.
     want=$(echo "$gate" | json 'd.get("integrity","")')
-    have=$(npm view "$spec" dist.integrity 2>/dev/null || true)
-    if [ -n "$want" ] && [ "$want" != "$have" ]; then echo "quarantine: $spec integrity changed since approval" >&2; exit 1; fi
+    have=$(npm view "$pinned" dist.integrity 2>/dev/null || true)
+    if [ -z "$want" ] || [ "$want" != "$have" ]; then echo "quarantine: $pinned integrity differs from the approval" >&2; exit 1; fi
   fi
   if [ "$decision" = "unknown" ]; then
-    echo "quarantine: $spec has not cleared customs — detonating it now…" >&2
-    id=$(curl -fsS -X POST "$Q/api/runs" -H 'content-type: application/json' -d "{\"spec\":\"npm:$spec\"}" | json 'd["id"]')
+    echo "quarantine: $pinned has not cleared customs — detonating it now…" >&2
+    id=$(curl -fsS -X POST "$Q/api/runs" -H 'content-type: application/json' -d "{\"spec\":\"npm:$pinned\"}" | json 'd["id"]')
     while :; do
       r=$(curl -fsS "$Q/api/runs/$id"); st=$(echo "$r" | json 'd["status"]')
       [ "$st" = "done" ] || [ "$st" = "error" ] && break; sleep 3
     done
     verdict=$(echo "$r" | json 'd.get("verdict")')
-    echo "quarantine: $spec -> $verdict ($Q/#/run/$id)" >&2
-    [ "$verdict" = "CLEAN" ] || { echo "quarantine: refusing to install $spec" >&2; exit 1; }
+    echo "quarantine: $pinned -> $verdict ($Q/#/run/$id)" >&2
+    [ "$verdict" = "CLEAN" ] || { echo "quarantine: refusing to install $pinned" >&2; exit 1; }
   fi
+  exact+=("$pinned")
 done
-exec npm install "$@"
+exec npm install "${flags[@]}" "${exact[@]}"

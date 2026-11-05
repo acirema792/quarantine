@@ -165,6 +165,12 @@ ufw allow 443/tcp >/dev/null 2>&1 || true
 log "Self-test"
 for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS http://127.0.0.1:8000/api/health | python3 -m json.tool | head -30
+log "Containment self-test: every sample shipment under gVisor, all 15 escape probes"
+if bash "$APP_DIR/deploy/selftest.sh" http://127.0.0.1:8000; then
+  echo "Self-test passed."
+else
+  echo "WARNING: self-test FAILED — do not demo until 'sudo $APP_DIR/deploy/selftest.sh' passes." >&2
+fi
 echo
 echo "Quarantine is live at: https://$DOMAIN"
 echo "Admin token (needed to approve/block real packages): $(grep ^ADMIN_TOKEN= "$ENV_FILE" | cut -d= -f2)"
