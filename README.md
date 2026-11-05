@@ -6,7 +6,7 @@ Quarantine is a web app that detonates npm and PyPI packages, including MCP serv
 
 Built for the **lablab.ai × Vultr Agent Rush hackathon, Challenge 1 "Blast Radius Zero"**.
 
-> Live demo: `https://<vm-ip>.sslip.io` · Video: `<link>` · Slides: `<link>`
+> **Live demo: https://64-177-50-4.sslip.io** (Vultr VX1 VM, Atlanta) · Code: https://github.com/acirema792/quarantine · Video and slides: linked from the lablab.ai submission
 
 ---
 
