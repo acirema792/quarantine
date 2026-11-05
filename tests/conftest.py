@@ -17,6 +17,7 @@ os.environ["VULTR_INFERENCE_API_KEY"] = "test-vultr-key"
 os.environ["VULTR_INFERENCE_BASE_URL"] = f"http://127.0.0.1:{MOCK_PORT}/v1"
 os.environ["VULTR_MODEL"] = "kimi-k2-instruct"
 os.environ.setdefault("RATE_LIMIT_PER_HOUR", "1000")
+os.environ["EXTRA_FIXTURES_DIR"] = str(ROOT / "tests" / "fixtures")
 # The mock server is local; make sure no corporate proxy intercepts it.
 os.environ["NO_PROXY"] = os.environ["no_proxy"] = "127.0.0.1,localhost"
 

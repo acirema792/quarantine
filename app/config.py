@@ -19,7 +19,7 @@ class Settings:
     # Comma-separated preference list; first one present in /v1/models wins.
     model_prefs = [m.strip() for m in os.environ.get(
         "VULTR_MODEL",
-        "kimi-k2-instruct,kimi-k2.6,glm-5.3,glm-5.2,deepseek-v4.1-flash,qwen3.8-flash-next,gpt-oss-120b",
+        "kimi-k2.6,glm-5.3,deepseek-v4.1-flash,kimi-k2-instruct,glm-5.2,qwen3.8-flash-next,gpt-oss-120b",
     ).split(",") if m.strip()]
     llm_timeout = _int("LLM_TIMEOUT", 90)
 
@@ -28,7 +28,7 @@ class Settings:
     proxy_image = os.environ.get("PROXY_IMAGE", "quarantine-proxy:latest")
     # "auto" -> runsc (gVisor) when Docker has it, else runc with a loud warning
     runtime = os.environ.get("SANDBOX_RUNTIME", "auto")
-    mem_limit = os.environ.get("SANDBOX_MEMORY", "768m")
+    mem_limit = os.environ.get("SANDBOX_MEMORY", "1g")  # tmpfs pages count against this too
     nano_cpus = int(float(os.environ.get("SANDBOX_CPUS", "1")) * 1e9)
     pids_limit = _int("SANDBOX_PIDS", 256)
     run_timeout = _int("SANDBOX_TIMEOUT", 150)  # hard wall clock for the whole detonation
@@ -44,6 +44,7 @@ class Settings:
     # --- App -------------------------------------------------------------
     data_dir = Path(os.environ.get("DATA_DIR", ROOT / "data"))
     fixtures_dir = ROOT / "fixtures"
+    extra_fixtures_dir = Path(os.environ["EXTRA_FIXTURES_DIR"]) if os.environ.get("EXTRA_FIXTURES_DIR") else None
     max_package_mb = _int("MAX_PACKAGE_MB", 25)
     # Public demo mode: only bundled fixtures + real registry packages, no uploads.
     allow_registry_targets = os.environ.get("ALLOW_REGISTRY_TARGETS", "1") == "1"

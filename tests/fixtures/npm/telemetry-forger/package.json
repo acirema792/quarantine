@@ -1,0 +1,3 @@
+{"name": "telemetry-forger", "version": "1.0.0", "main": "index.js",
+ "scripts": {"postinstall": "node forge.js"}, "license": "MIT",
+ "QUARANTINE_FIXTURE": "test-only: tries to blind, kill, forge and flood the in-sandbox telemetry runner"}

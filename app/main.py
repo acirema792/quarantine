@@ -3,6 +3,7 @@ that holds the Vultr Inference key and talks to the Docker engine."""
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import time
 from pathlib import Path
@@ -21,6 +22,20 @@ app = FastAPI(title="Quarantine", version="1.0.0",
               description="Customs for the agent supply chain — sandboxed package & MCP detonation on Vultr.")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; "
+       "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    if not request.url.path.startswith("/docs") and request.url.path != "/openapi.json":
+        resp.headers["Content-Security-Policy"] = CSP
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["X-Frame-Options"] = "DENY"
+    return resp
+
 
 @app.on_event("startup")
 def _startup():
@@ -38,8 +53,12 @@ def _startup():
 
 
 def _client_ip(req: Request):
+    peer = req.client.host if req.client else "?"
     fwd = req.headers.get("x-forwarded-for")
-    return (fwd.split(",")[0].strip() if fwd else (req.client.host if req.client else "?"))
+    # Only trust X-Forwarded-For from the local reverse proxy (Caddy), never from the internet.
+    if fwd and peer in ("127.0.0.1", "::1"):
+        return fwd.split(",")[-1].strip()
+    return peer
 
 
 @app.get("/")
@@ -65,7 +84,8 @@ def health():
 
 @app.get("/api/fixtures")
 def fixtures():
-    return fetcher.list_fixtures()
+    return [{k: v for k, v in f.items() if not k.startswith("_")} for f in fetcher.list_fixtures()
+            if not f.get("hidden")]
 
 
 class RunIn(BaseModel):
@@ -82,7 +102,10 @@ def create_run(body: RunIn, req: Request):
     ip = _client_ip(req)
     if store.recent_client_runs(ip, time.time() - 3600) >= settings.rate_limit_per_hour:
         raise HTTPException(429, "rate limit: too many scans from your address this hour")
-    return {"id": agent.start(body.spec, ip)}
+    try:
+        return {"id": agent.start(body.spec, ip)}
+    except agent.QueueFull as exc:
+        raise HTTPException(503, str(exc))
 
 
 @app.get("/api/runs")
@@ -102,23 +125,27 @@ def run_detail(run_id: str):
 
 @app.get("/api/runs/{run_id}/events")
 async def run_events(run_id: str, request: Request, after: int = -1):
-    if not store.get_run(run_id):
+    if not await asyncio.to_thread(store.get_run, run_id):
         raise HTTPException(404, "not found")
+    try:  # EventSource reconnects send Last-Event-ID: resume instead of replaying
+        after = max(after, int(request.headers.get("last-event-id", "-1")))
+    except ValueError:
+        pass
 
     async def gen():
         last = after
         idle = 0
         while True:
-            rows = store.events(run_id, last)
+            rows = await asyncio.to_thread(store.events, run_id, last, 400)
             for row in rows:
                 last = row["seq"]
-                data = {"seq": row["seq"], "ts": row["ts"], "source": row["source"], "hash": row["hash"],
-                        **row["data"]}
+                data = {**row["data"], "seq": row["seq"], "ts": row["ts"], "source": row["source"],
+                        "hash": row["hash"]}
                 yield f"id: {row['seq']}\ndata: {json.dumps(data, default=str)}\n\n"
             run = agent.ACTIVE.get(run_id)
             finished = (run is None or run.done) and not rows
             if finished:
-                r = store.get_run(run_id)
+                r = await asyncio.to_thread(store.get_run, run_id)
                 if r and r["status"] in ("done", "error"):
                     yield "event: end\ndata: {}\n\n"
                     return
@@ -165,11 +192,15 @@ class DecisionIn(BaseModel):
 
 @app.post("/api/runs/{run_id}/decision")
 def decide(run_id: str, body: DecisionIn, req: Request):
-    if settings.admin_token and req.headers.get("x-admin-token") != settings.admin_token:
-        raise HTTPException(403, "admin token required")
     r = store.get_run(run_id)
     if not r or r["status"] != "done":
         raise HTTPException(400, "run not finished")
+    is_fixture = ((r.get("report") or {}).get("target") or {}).get("source") == "fixture"
+    # Policy for real packages is an admin decision. Sample shipments stay open so anyone
+    # can try the approval flow on the public demo without touching real policy.
+    if settings.admin_token and not is_fixture and not hmac.compare_digest(
+            req.headers.get("x-admin-token", ""), settings.admin_token):
+        raise HTTPException(403, "admin token required to set policy for real packages")
     store.set_policy(r["ecosystem"], r["name"], r["version"], r["sha256"],
                      "allow" if body.decision == "approve" else "block", body.note, run_id, r["verdict"])
     return {"ok": True, "policy": store.get_policy(r["ecosystem"], r["name"], r["version"])}
@@ -182,12 +213,15 @@ def policy():
 
 @app.get("/api/gate")
 def gate(ecosystem: str, name: str, version: str = ""):
-    """Install gate for CI / coding agents: allow | block | unknown."""
-    p = store.get_policy(ecosystem, name, version) if version else None
-    if not p:
-        rows = store.q("SELECT * FROM policy WHERE ecosystem=? AND name=? ORDER BY decided_at DESC",
-                       (ecosystem, name))
-        p = next((x for x in rows if not version or x["version"] == version), None)
+    """Install gate for CI / coding agents: allow | block | unknown.
+
+    Decisions are per exact version: approving x@1.0.0 says nothing about x@latest.
+    Without a version the gate can only report "unknown" (qnpm resolves it first)."""
+    if not version:
+        last = store.q("SELECT id, verdict, version FROM runs WHERE ecosystem=? AND name=? AND status='done' "
+                       "ORDER BY finished DESC LIMIT 1", (ecosystem, name), one=True)
+        return {"decision": "unknown", "error": "exact version required", "last_scan": last}
+    p = store.get_policy(ecosystem, name, version)
     if p:
         return {"decision": p["decision"], "version": p["version"], "sha256": p["sha256"],
                 "run_id": p["run_id"], "verdict": p["verdict"]}

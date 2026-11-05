@@ -1,0 +1,2 @@
+{"name": "aws-sdk-like", "version": "1.0.0", "main": "index.js", "license": "MIT",
+ "QUARANTINE_FIXTURE": "test-only: honest SDK that reads ~/.aws/credentials when called, and ./.env (dotenv style)"}

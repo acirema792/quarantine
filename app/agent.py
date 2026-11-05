@@ -29,6 +29,12 @@ from .static_scan import scan_package
 
 ACTIVE: dict[str, "Run"] = {}
 _slots = threading.Semaphore(settings.max_concurrent)
+MAX_TELEMETRY_EVENTS = 4000  # per run, sandbox + proxy; beyond this we count, not store
+MAX_QUEUED = 12
+
+
+class QueueFull(RuntimeError):
+    pass
 
 STEPS = ["intake", "static", "analyst", "detonate", "verdict", "explain", "receipt"]
 
@@ -41,16 +47,28 @@ class Run:
         self.done = False
         self.lock = threading.Lock()
         self.events = []
+        self.telemetry = 0
+        self.dropped = 0
 
     def emit(self, source, data):
         with self.lock:
+            if source in ("sandbox", "proxy"):
+                self.telemetry += 1
+                if self.telemetry > MAX_TELEMETRY_EVENTS:
+                    self.dropped += 1
+                    if self.dropped == 1:
+                        data = {"type": "telemetry_truncated", "limit": MAX_TELEMETRY_EVENTS}
+                        source = "engine"
+                    else:
+                        return
+            data = {k: v for k, v in data.items() if k not in ("seq", "source", "hash", "ts")}
             self.seq += 1
-            payload = {"seq": self.seq, "source": source, **data}
+            payload = {**data, "seq": self.seq, "source": source}
             h = evidence.chain_hash(self.prev, payload)
             self.prev = h
             ts = time.time()
-            store.add_event(self.id, self.seq, ts, source, data.get("type", "?"), data, h)
-            self.events.append({"_source": source, **data})
+            store.add_event(self.id, self.seq, ts, source, str(data.get("type", "?"))[:40], data, h)
+            self.events.append({**data, "_source": source})
         with self.cond:
             self.cond.notify_all()
 
@@ -65,6 +83,8 @@ def _decoys():
 
 
 def start(spec, client_ip):
+    if sum(1 for r in ACTIVE.values() if not r.done) >= MAX_QUEUED:
+        raise QueueFull("the detonation queue is full; try again in a minute")
     run_id = sandbox.new_run_id()
     store.create_run(run_id, spec, client_ip)
     run = Run(run_id, spec)
@@ -175,7 +195,7 @@ setTimeout(() => process.exit(0), 1500);
 """
         return {"claimed_purpose": t.manifest.get("description", ""), "harness_language": "node",
                 "harness_code": code, "execution_points": [], "suspicions": [], "source": "heuristic"}
-    mod = t.name.replace("-", "_").lower()
+    mod = _python_module(t)
     code = f"""import importlib, json
 out = []
 try:
@@ -187,6 +207,25 @@ print(json.dumps(out))
 """
     return {"claimed_purpose": "", "harness_language": "python", "harness_code": code,
             "execution_points": [], "suspicions": [], "source": "heuristic"}
+
+
+def _python_module(t):
+    """Best guess at the import name: top_level.txt, else the first package dir, else the name."""
+    for f in t.files:
+        if f["path"].endswith("top_level.txt"):
+            try:
+                first = (t.files_dir / f["path"]).read_text().split()
+                if first:
+                    return first[0]
+            except OSError:
+                pass
+    for f in t.files:
+        parts = f["path"].split("/")
+        if parts[-1] == "__init__.py" and len(parts) in (2, 3):
+            pkg = parts[-2]
+            if pkg not in ("tests", "test", "docs", "examples") and pkg.isidentifier():
+                return pkg
+    return t.name.replace("-", "_").lower()
 
 
 def _usage_cb(run, purpose):
@@ -209,7 +248,8 @@ def analyst(run, t, static_findings):
     for turn in range(8):
         force = "required" if turn >= 5 else "auto"
         try:
-            msg = llm.chat(msgs, tools=ANALYST_TOOLS, tool_choice=force, on_usage=_usage_cb(run, "analyst"))
+            msg = llm.chat(msgs, tools=ANALYST_TOOLS, tool_choice=force, max_tokens=4000,
+                           on_usage=_usage_cb(run, "analyst"))
         except LLMError as exc:
             run.emit("vultr", {"type": "llm_error", "error": str(exc)[:300]})
             return _heuristic_plan(t)
@@ -245,7 +285,8 @@ def heal_harness(run, t, plan, output):
                 f"Sandbox output (untrusted):\n<untrusted_output>\n{output[-2500:]}\n</untrusted_output>\n"
                 "Fix the harness bug (not the package) and call submit_plan with the corrected harness."}]
     try:
-        msg = llm.chat(msgs, tools=ANALYST_TOOLS[-1:], tool_choice="required", on_usage=_usage_cb(run, "heal"))
+        msg = llm.chat(msgs, tools=ANALYST_TOOLS[-1:], tool_choice="required", max_tokens=4000,
+                       on_usage=_usage_cb(run, "heal"))
     except LLMError as exc:
         run.emit("vultr", {"type": "llm_error", "error": str(exc)[:300]})
         return None
@@ -333,14 +374,27 @@ def _detonate_once(run, t, plan, rundir, attempt):
            "decoys": decoys, "harness": harness, "mcp_command": t.mcp_command,
            "timeouts": {"install": 60, "exercise": 25, "mcp": 25}}
     allow = _allow_hosts(t.ecosystem)
+    policydir = rundir / f"policy{attempt}"
+    locked = []
 
     def on_event(source, ev):
         ev = dict(ev)
         ev["attempt"] = attempt
         run.emit(source, ev)
+        # Registries are needed to resolve dependencies during install, and for nothing
+        # after it: lock the proxy down the moment the install phase ends.
+        if (source == "sandbox" and ev.get("type") == "phase_end" and ev.get("phase") == "install"
+                and not locked):
+            locked.append(True)
+            try:
+                (policydir / "allow.txt").write_text("")
+            except OSError:
+                pass
+            run.emit("engine", {"type": "lifecycle", "action": "registry_locked", "attempt": attempt})
 
     start_idx = len(run.events)
-    det = sandbox.detonate(run.id + f"-{attempt}", jobdir, job, on_event, allow, list(decoys.values()))
+    det = sandbox.detonate(run.id + f"-{attempt}", jobdir, job, on_event, allow, list(decoys.values()),
+                           policydir=policydir)
     det["events"] = run.events[start_idx:]
     det["allow_hosts"] = allow
     return det
@@ -358,7 +412,9 @@ def _execute(run: Run):
             run.step("intake", "running")
             t = fetcher.resolve(run.spec, rundir / "pkg")
             store.update_run(run.id, ecosystem=t.ecosystem, name=t.name, version=t.version, sha256=t.sha256)
-            run.emit("pipeline", {"type": "target", **t.public()})
+            pub = t.public()
+            run.emit("pipeline", {"type": "target", **{k: v for k, v in pub.items() if k != "source"},
+                                  "origin": pub["source"]})
             run.step("intake", "done")
 
             # 2. static ---------------------------------------------------------
@@ -373,7 +429,7 @@ def _execute(run: Run):
             plan["harness_sha256"] = hashlib.sha256(plan["harness_code"].encode()).hexdigest()
             run.emit("vultr", {"type": "agent_plan", **{k: plan.get(k) for k in (
                 "claimed_purpose", "execution_points", "suspicions", "harness_language", "harness_code",
-                "harness_sha256", "source")}})
+                "harness_sha256")}, "harness_source": plan.get("source")})
             run.step("analyst", "done")
 
             # 4. detonate (+ one self-healing retry) -----------------------------
@@ -390,7 +446,7 @@ def _execute(run: Run):
                     if healed:
                         healed["harness_sha256"] = hashlib.sha256(healed["harness_code"].encode()).hexdigest()
                         run.emit("vultr", {"type": "agent_plan", **{k: healed.get(k) for k in (
-                            "claimed_purpose", "harness_language", "harness_code", "harness_sha256", "source")}})
+                            "claimed_purpose", "harness_language", "harness_code", "harness_sha256")}, "harness_source": healed.get("source")})
                         plan = healed
                         det2 = _detonate_once(run, t, plan, rundir, 2)
                         attempts.append(det2)
@@ -456,7 +512,9 @@ def _execute(run: Run):
         run.done = True
         with run.cond:
             run.cond.notify_all()
-        shutil.rmtree(rundir / "pkg" / "src", ignore_errors=True)
+        run.events = []  # everything is persisted; free memory
+        ACTIVE.pop(run.id, None)
+        shutil.rmtree(rundir, ignore_errors=True)  # archives + job files; the receipt keeps the hashes
 
 
 def _phase_end(events, phase):

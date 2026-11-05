@@ -59,8 +59,9 @@ class Target:
 
 def list_fixtures():
     out = []
-    for eco in ("npm", "pypi"):
-        base = settings.fixtures_dir / eco
+    roots = [settings.fixtures_dir] + ([settings.extra_fixtures_dir] if settings.extra_fixtures_dir else [])
+    for root, eco in [(r, e) for r in roots for e in ("npm", "pypi")]:
+        base = root / eco
         if not base.exists():
             continue
         for d in sorted(base.iterdir()):
@@ -72,7 +73,8 @@ def list_fixtures():
             elif (d / "setup.py").exists():
                 m = re.search(r'description="([^"]+)"', (d / "setup.py").read_text())
                 desc = m.group(1) if m else ""
-            out.append({"spec": f"fixture:{d.name}", "ecosystem": eco, "name": d.name, "description": desc})
+            out.append({"spec": f"fixture:{d.name}", "ecosystem": eco, "name": d.name, "description": desc,
+                        "_dir": str(d), "hidden": root != settings.fixtures_dir})
     return out
 
 
@@ -111,9 +113,16 @@ def _deterministic_tgz(src: Path, prefix: str) -> bytes:
     return buf.getvalue()
 
 
+DOWNLOAD_HOSTS = {"registry.npmjs.org", "files.pythonhosted.org"}
+
+
 def _download(client: httpx.Client, url: str) -> bytes:
+    """Fetch an archive from the registries' own file hosts only; no redirects followed."""
+    u = httpx.URL(url)
+    if u.scheme != "https" or u.host not in DOWNLOAD_HOSTS:
+        raise TargetError(f"refusing to download from {u.host}: not a registry file host")
     cap = settings.max_package_mb * 1024 * 1024
-    with client.stream("GET", url) as r:
+    with client.stream("GET", url, follow_redirects=False) as r:
         r.raise_for_status()
         chunks, total = [], 0
         for chunk in r.iter_bytes():
@@ -131,7 +140,8 @@ def _resolve_npm(client, name, version):
         raise TargetError(f"npm package '{name}' not found")
     r.raise_for_status()
     meta = r.json()
-    version = version or meta.get("dist-tags", {}).get("latest", "")
+    tags = meta.get("dist-tags", {})
+    version = tags.get(version or "latest", version)  # accepts dist-tags such as "latest" / "next"
     info = meta.get("versions", {}).get(version)
     if not info:
         raise TargetError(f"version '{version}' not found for {name}")
@@ -172,7 +182,7 @@ def resolve(spec: str, workdir: Path) -> Target:
         if not match:
             raise TargetError(f"unknown fixture '{name}'")
         eco = match["ecosystem"]
-        src = settings.fixtures_dir / eco / name
+        src = Path(match["_dir"])
         if eco == "npm":
             version = json.loads((src / "package.json").read_text())["version"]
             data = _deterministic_tgz(src, "package")
@@ -236,8 +246,13 @@ def safe_extract(archive: Path, dest: Path, max_files=4000, max_bytes=60 * 1024 
                 if not info.is_dir() and info.file_size < 5 * 1024 * 1024:
                     place("pkg/" + info.filename, z.read(info))
     else:
-        with tarfile.open(archive, "r:*") as tar:
-            for m in tar.getmembers():
+        # Streaming read with hard stops, so a decompression bomb costs bounded work.
+        seen = 0
+        with tarfile.open(archive, "r|*") as tar:
+            for m in tar:
+                seen += 1
+                if seen > max_files * 2 or total > max_bytes or len(out) >= max_files:
+                    break
                 if m.isfile() and m.size < 5 * 1024 * 1024:
                     f = tar.extractfile(m)
                     if f:

@@ -55,19 +55,27 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
         sig.append({"severity": sev, "kind": kind, "title": title, "detail": detail, "owasp": owasp,
                     "source": source})
 
-    decoys, denied, canary_hosts, allowed = set(), {}, set(), {}
+    decoys, denied, canary_hosts, allowed, locked_hits = set(), {}, set(), {}, set()
     stats = {}
+    done_attempts, started_attempts, anomalies = set(), set(), []
     for ev in events:
         t, src = ev.get("type"), ev.get("_source")
-        if t == "decoy_read" and ev.get("phase") in ("install", "exercise", "mcp"):
+        if t == "runner_start":
+            started_attempts.add(ev.get("attempt"))
+        elif t == "decoy_read" and ev.get("phase") in ("install", "exercise", "mcp"):
             decoys.add(ev["path"])
         elif t == "egress" and ev.get("verdict") == "DENY":
             host = ev.get("host")
+            if ev.get("reason") == "registry_locked_after_install":
+                locked_hits.add(host)
+                continue
             denied.setdefault(host, []).append(ev)
             if ev.get("canary_hit"):
                 canary_hosts.add(host)
         elif t == "egress" and ev.get("verdict") == "ALLOW":
             allowed[ev.get("host")] = allowed.get(ev.get("host"), 0) + (ev.get("bytes_out") or 0)
+        elif t in ("telemetry_anomaly", "telemetry_truncated", "runner_error"):
+            anomalies.append(ev)
         elif t == "net_attempt":
             if not ev.get("dst", "").endswith(":3128"):
                 add("high", "direct_connect", f"Direct connection attempt to {ev['dst']} (no route out)",
@@ -83,6 +91,7 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
                     f.get("snippet", ""), "ASI01")
         elif t == "runner_done":
             stats = ev.get("stats") or {}
+            done_attempts.add(ev.get("attempt"))
         elif t == "stats":
             stats["peak_mem_mb"] = max(stats.get("peak_mem_mb", 0), ev.get("peak_mem_mb") or 0)
             stats["peak_pids_cgroup"] = max(stats.get("peak_pids_cgroup", 0), ev.get("peak_pids") or 0)
@@ -90,9 +99,16 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
             add("medium", "timeout", f"{ev.get('phase')} phase hit its time cap ({ev.get('seconds')}s)",
                 "Killed by the runner timeout.", "ASI08")
 
+    # Decoys: one credential read can be honest (an AWS SDK reads ~/.aws/credentials when
+    # called). Sweeping several stores, or reading one and then calling out, is not.
+    phoned_home = bool(denied) or bool(locked_hits)
+    sweep = len(decoys) >= 3
     for d in sorted(decoys):
-        add("critical", "decoy_read", f"Read decoy credential {d.replace('/home/dev', '~')}",
-            "Planted honeytoken file; no legitimate package needs it.", "ASI03")
+        sev = "critical" if (sweep or phoned_home) else "high"
+        why = ("One of several credential stores read in the same run." if sweep else
+               "Read, then an outbound connection was attempted." if phoned_home else
+               "Planted honeytoken file. Some SDKs read this legitimately; review the call site.")
+        add(sev, "decoy_read", f"Read decoy credential {d.replace('/home/dev', '~')}", why, "ASI03")
     for host in sorted(canary_hosts):
         add("critical", "exfil_attempt", f"Tried to send decoy credentials to {host}",
             "Decoy secret found in the outbound request. Blocked at the egress proxy — 0 bytes delivered.",
@@ -100,6 +116,27 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
     for host in sorted(set(denied) - canary_hosts):
         add("high", "egress_denied", f"Outbound connection to {host} blocked",
             f"{len(denied[host])} attempt(s); host not in allowlist.", "ASI02")
+
+    for host in sorted(locked_hits):
+        add("high", "registry_after_install", f"Contacted {host} after install finished",
+            "Registries are only reachable while dependencies install; runtime traffic there was refused.",
+            "ASI02")
+    for host, out in sorted(allowed.items()):
+        if out > 256 * 1024:
+            add("high", "registry_upload", f"Uploaded {out // 1024} KB to {host}",
+                "Package downloads send a few KB of requests; this looks like publishing or a dead-drop.",
+                "ASI02")
+
+    # Telemetry integrity: the runner is out of the package's reach (different uid), so a
+    # missing summary or a forged/flooded stream is itself evidence.
+    missing = sorted(a for a in started_attempts - done_attempts if a is not None) if started_attempts else []
+    if anomalies or missing or det.get("telemetry_drained") is False:
+        detail = "; ".join(sorted({a.get("detail") or a.get("type") for a in anomalies})[:3]) or \
+            "the in-sandbox runner did not report a summary"
+        add("high", "telemetry_tampering", "Sandbox telemetry was disrupted", detail, "ASI10")
+    if not started_attempts and det.get("seconds") is not None:
+        add("high", "telemetry_tampering", "Sandbox runner never reported in",
+            "No runner_start event: the sandbox failed or its output was suppressed.", "ASI10")
 
     peak_pids = max(stats.get("pids_peak", 0), stats.get("peak_pids_cgroup", 0))
     if peak_pids >= int(pids_limit * 0.85) or stats.get("procs_total", 0) > 500:
@@ -146,6 +183,8 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
         # measured by the proxy: bytes forwarded upstream to non-allowlisted hosts
         "bytes_exfiltrated": sum((e.get("bytes_out") or 0) for v in denied.values() for e in v),
         "allowed_bytes_out": allowed,
+        "registry_bytes_out": sum(allowed.values()),
+        "registry_after_install": sorted(locked_hits),
         "peak_pids": peak_pids,
         "procs_total": stats.get("procs_total", 0),
         "peak_mem_mb": stats.get("peak_mem_mb", 0),

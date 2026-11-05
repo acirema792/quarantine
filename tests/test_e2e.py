@@ -48,6 +48,7 @@ def test_fixture_verdicts(spec, verdict, must_have):
     for d in rep["detonation"]:
         p = d["proof"]
         assert p["network_internal"] and p["readonly_rootfs"] and p["cap_drop"] == ["ALL"]
+        assert set(p["cap_add"]) <= {"SETUID", "SETGID", "KILL", "DAC_READ_SEARCH"} and p["package_uid"] == 10001
         assert p["real_secrets_in_env"] == [] and not p["docker_socket_mounted"] and not p["privileged"]
         assert p["memory_mb"] == p["memory_swap_mb"] and p["pids_limit"] > 0
         assert d["teardown"]["verified"]
@@ -87,3 +88,22 @@ def test_tampered_event_breaks_verification():
     r, _ = run_spec("fixture:mcp-weather-plus")
     store.q("UPDATE events SET data=replace(data, 'DENY', 'ALLOW') WHERE run_id=? AND type='egress'", (r["id"],))
     assert not agent.verify(r["id"])["ok"]
+
+
+def test_telemetry_channel_cannot_be_forged_killed_or_flooded():
+    """Package code runs as a different uid from the runner: it cannot write to the
+    runner's stdout, signal it, or read the job file; its own output is plain text."""
+    r, events = run_spec("fixture:telemetry-forger")
+    lines = [e.get("line", "") for e in events if e.get("type") == "output"]
+    forge = [ln for ln in lines if ln.startswith("FORGE ")]
+    assert forge and not [ln for ln in forge if "SUCCEEDED" in ln], forge
+    assert not [e for e in events if e.get("type") == "target" and e.get("source") != "pipeline"]
+    assert any(e.get("type") == "runner_done" for e in events)  # runner survived
+    assert r["report"]["assessment"]["verdict"] == "MALICIOUS"  # swept 3 credential stores
+    out_events = [e for e in events if e.get("type") == "output"]
+    assert len(out_events) < 2000  # flood was bounded by the runner, not stored line by line
+
+
+def test_honest_sdk_reading_aws_credentials_is_not_convicted():
+    r, _ = run_spec("fixture:aws-sdk-like")
+    assert r["report"]["assessment"]["verdict"] in ("CLEAN", "SUSPICIOUS")

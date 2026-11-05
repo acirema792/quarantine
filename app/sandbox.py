@@ -15,6 +15,7 @@ the user as proof, not just claimed):
 from __future__ import annotations
 
 import json
+import os
 import random
 import shutil
 import subprocess
@@ -31,6 +32,16 @@ from .config import settings
 
 LABEL = "dev.quarantine.run"
 SANDBOX_UID = 10001
+# Capabilities kept by the *runner* (uid 0 in the sandbox) so it can drop package code to
+# uid 10001, kill it, and read its files for telemetry. Package code gets none of them.
+RUNNER_CAPS = ["SETUID", "SETGID", "KILL", "DAC_READ_SEARCH"]
+LOG_CONFIG = {"type": "json-file", "config": {"max-size": "5m", "max-file": "1"}}
+
+# Event types each source may emit. Anything else is treated as tampering evidence.
+SANDBOX_TYPES = {"runner_start", "decoys_planted", "decoy_read", "proc", "net_attempt", "phase_start",
+                 "phase_end", "output", "mcp_tool", "mcp_call", "fs_change", "lingering_killed",
+                 "runner_done", "runner_error", "monitor_warning"}
+PROXY_TYPES = {"egress"}
 
 _client = None
 
@@ -55,9 +66,14 @@ def _fw_rule():
 
 def host_firewall(ensure=False):
     """Sandbox subnets may talk to their proxy (bridged) but never to the host's own IPs."""
-    ipt = shutil.which("iptables")
-    if not ipt:
-        return {"active": False, "reason": "iptables not found"}
+    marker = Path("/run/quarantine/firewall.ok")
+    ipt = shutil.which("iptables") or ("/usr/sbin/iptables" if Path("/usr/sbin/iptables").exists() else None)
+    if os.geteuid() != 0 or not ipt:
+        # Non-root service: the rule is installed by deploy/firewall.sh (ExecStartPre=+, as root),
+        # which leaves this marker; we cannot run iptables -C ourselves.
+        if marker.exists():
+            return {"active": True, "rule": marker.read_text().strip(), "via": "deploy/firewall.sh"}
+        return {"active": False, "reason": "iptables unavailable to this user and no firewall marker"}
     try:
         check = subprocess.run([ipt, "-C", *_fw_rule()], capture_output=True, timeout=10)
         if check.returncode != 0 and ensure:
@@ -116,15 +132,35 @@ def _follow(container, source, on_event, stop):
         _dispatch(buf, source, on_event)
 
 
+def _clean(v, depth=0):
+    """Bound the size/shape of untrusted telemetry before it is stored or rendered."""
+    if depth > 4:
+        return None
+    if isinstance(v, str):
+        return v[:2000]
+    if isinstance(v, (int, float, bool)) or v is None:
+        return v
+    if isinstance(v, list):
+        return [_clean(x, depth + 1) for x in v[:60]]
+    if isinstance(v, dict):
+        return {str(k)[:64]: _clean(x, depth + 1) for k, x in list(v.items())[:60]}
+    return str(v)[:200]
+
+
 def _dispatch(line, source, on_event):
     text = line.decode(errors="replace").strip()
     if not text:
         return
+    allowed = SANDBOX_TYPES if source == "sandbox" else PROXY_TYPES if source == "proxy" else set()
     try:
         ev = json.loads(text)
         if isinstance(ev, dict) and ev.get("q") == 1:
             ev.pop("q", None)
-            on_event(source, ev)
+            if ev.get("type") in allowed:
+                on_event(source, _clean(ev))
+            else:
+                on_event(source, {"type": "telemetry_anomaly",
+                                  "detail": f"unexpected event type {str(ev.get('type'))[:40]!r} from {source}"})
             return
     except ValueError:
         pass
@@ -162,6 +198,7 @@ def containment_proof(attrs, runtime, net_attrs):
         "network_internal": bool(net_attrs.get("Internal")),
         "readonly_rootfs": bool(hc.get("ReadonlyRootfs")),
         "user": cfg.get("User"),
+        "package_uid": SANDBOX_UID,
         "cap_drop": hc.get("CapDrop"),
         "cap_add": hc.get("CapAdd"),
         "privileged": bool(hc.get("Privileged")),
@@ -180,8 +217,12 @@ def containment_proof(attrs, runtime, net_attrs):
     }
 
 
-def detonate(run_id: str, jobdir: Path, job: dict, on_event, allow_hosts, canaries):
-    """Run one detonation. Blocks until finished. Returns a result dict."""
+def detonate(run_id: str, jobdir: Path, job: dict, on_event, allow_hosts, canaries, policydir: Path = None):
+    """Run one detonation. Blocks until finished. Returns a result dict.
+
+    `policydir` (mounted read-only into the proxy only) holds allow.txt, which the
+    control plane empties once the install phase ends: registries are reachable for
+    dependency resolution, and for nothing afterwards."""
     c = client()
     runtime = resolve_runtime()
     short = run_id[:12]
@@ -198,12 +239,20 @@ def detonate(run_id: str, jobdir: Path, job: dict, on_event, allow_hosts, canari
                             "internal": True,
                             "subnet": ((net.attrs.get("IPAM") or {}).get("Config") or [{}])[0].get("Subnet")})
 
+        proxy_vols = {}
+        if policydir is not None:
+            policydir.mkdir(parents=True, exist_ok=True)
+            (policydir / "allow.txt").write_text("\n".join(allow_hosts))
+            policydir.chmod(0o755)
+            (policydir / "allow.txt").chmod(0o644)
+            proxy_vols = {str(policydir): {"bind": "/policy", "mode": "ro"}}
         proxy = c.containers.run(
             settings.proxy_image, detach=True, name=f"q-egress-{short}", labels=labels,
             environment={"ALLOW_HOSTS": ",".join(allow_hosts), "CANARIES": ",".join(canaries),
-                         "UPSTREAM_PROXY": settings.upstream_proxy},
-            network="bridge", read_only=True, cap_drop=["ALL"], security_opt=["no-new-privileges"],
-            mem_limit="128m", pids_limit=64, nano_cpus=500_000_000,
+                         "UPSTREAM_PROXY": settings.upstream_proxy, "POLICY_FILE": "/policy/allow.txt"},
+            volumes=proxy_vols, network="bridge", read_only=True, cap_drop=["ALL"],
+            security_opt=["no-new-privileges"], mem_limit="128m", pids_limit=64, nano_cpus=500_000_000,
+            log_config=LOG_CONFIG,
         )
         net.connect(proxy, aliases=["egress"])
         proxy.reload()
@@ -213,7 +262,8 @@ def detonate(run_id: str, jobdir: Path, job: dict, on_event, allow_hosts, canari
         job = dict(job, proxy_url=f"http://{proxy_ip}:3128")
         (jobdir / "job.json").write_text(json.dumps(job))
         for p in jobdir.iterdir():
-            p.chmod(0o644)  # readable by the unprivileged sandbox user; mounted read-only
+            p.chmod(0o644)  # archive + harness: readable by package uid 10001; mounted read-only
+        (jobdir / "job.json").chmod(0o600)  # runner-only: package code cannot learn which files are decoys
         jobdir.chmod(0o755)
         th = threading.Thread(target=_follow, args=(proxy, "proxy", on_event, stop), daemon=True)
         th.start()
@@ -222,7 +272,7 @@ def detonate(run_id: str, jobdir: Path, job: dict, on_event, allow_hosts, canari
 
         box = c.containers.create(
             settings.sandbox_image, name=f"q-sbx-{short}", labels=labels, hostname="dev-laptop",
-            runtime=runtime, network=net.name, user=f"{SANDBOX_UID}:{SANDBOX_UID}", dns=["127.0.0.1"],
+            runtime=runtime, network=net.name, user="0:0", dns=["127.0.0.1"], log_config=LOG_CONFIG,
             environment={"Q_JOB": "/job/job.json", "HOME": "/home/dev"},
             volumes={str(jobdir): {"bind": "/job", "mode": "ro"}},
             read_only=True,
@@ -233,7 +283,7 @@ def detonate(run_id: str, jobdir: Path, job: dict, on_event, allow_hosts, canari
             },
             mem_limit=settings.mem_limit, memswap_limit=settings.mem_limit,
             nano_cpus=settings.nano_cpus, pids_limit=settings.pids_limit,
-            cap_drop=["ALL"], security_opt=["no-new-privileges"], init=True,
+            cap_drop=["ALL"], cap_add=RUNNER_CAPS, security_opt=["no-new-privileges"], init=True,
             ulimits=[Ulimit(name="nofile", soft=1024, hard=1024)],
         )
         box.reload()
@@ -245,10 +295,12 @@ def detonate(run_id: str, jobdir: Path, job: dict, on_event, allow_hosts, canari
         box.start()
         on_event("engine", {"type": "lifecycle", "action": "sandbox_started", "name": box.name,
                             "runtime": runtime})
-        for target, args in ((_follow, (box, "sandbox", on_event, stop)), (_stats, (box, on_event, stop))):
-            th = threading.Thread(target=target, args=args, daemon=True)
-            th.start()
-            threads.append(th)
+        follower = threading.Thread(target=_follow, args=(box, "sandbox", on_event, stop), daemon=True)
+        follower.start()
+        threads.append(follower)
+        th = threading.Thread(target=_stats, args=(box, on_event, stop), daemon=True)
+        th.start()
+        threads.append(th)
 
         try:
             status = box.wait(timeout=settings.run_timeout)
@@ -266,6 +318,10 @@ def detonate(run_id: str, jobdir: Path, job: dict, on_event, allow_hosts, canari
         state = box.attrs.get("State", {})
         result["oom_killed"] = bool(state.get("OOMKilled"))
         result["seconds"] = round(time.time() - t0, 2)
+        # Drain: the log stream ends when the container has exited, so wait for the
+        # follower to consume everything before anything is removed.
+        follower.join(timeout=20)
+        result["telemetry_drained"] = not follower.is_alive()
         time.sleep(1.0)  # let the proxy flush records for tunnels closing now
     finally:
         stop.set()

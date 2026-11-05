@@ -40,14 +40,18 @@ class VultrInference:
         return self._models
 
     def model(self):
-        """First preferred model that the live catalog actually offers."""
+        """First preferred model that the live catalog actually offers.
+
+        A failed catalog lookup is NOT cached: we answer with the first preference for
+        this call and try the catalog again next time."""
         if self._model:
             return self._model
         try:
             ids = [m.get("id") for m in self.models()]
         except Exception as exc:
             self.last_error = f"model list failed: {exc}"
-            ids = []
+            self._models = None
+            return settings.model_prefs[0]
         for pref in settings.model_prefs:
             if pref in ids:
                 self._model = pref
@@ -84,12 +88,18 @@ class VultrInference:
                     continue
                 r.raise_for_status()
                 data = r.json()
+                choice = data["choices"][0]
+                if choice.get("finish_reason") == "length" and attempt < 2 and body["max_tokens"] < 16000:
+                    # Reasoning models can spend the budget before the tool call: retry bigger.
+                    body["max_tokens"] = min(body["max_tokens"] * 2, 16000)
+                    last = "truncated (finish_reason=length)"
+                    continue
                 usage = data.get("usage") or {}
                 if on_usage:
                     on_usage({"model": body["model"], "latency_s": round(time.time() - t0, 2),
                               "prompt_tokens": usage.get("prompt_tokens"),
                               "completion_tokens": usage.get("completion_tokens")})
-                return data["choices"][0]["message"]
+                return choice["message"]
             except (httpx.HTTPError, KeyError, ValueError) as exc:
                 last = str(exc)
                 time.sleep(1.0 * (attempt + 1))

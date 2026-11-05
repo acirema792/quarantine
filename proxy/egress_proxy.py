@@ -21,6 +21,7 @@ import base64
 import ipaddress
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -28,7 +29,26 @@ from urllib.parse import urlsplit
 
 ALLOW = {h.strip().lower() for h in os.environ.get("ALLOW_HOSTS", "").split(",") if h.strip()}
 CANARIES = [c for c in os.environ.get("CANARIES", "").split(",") if c]
-UPSTREAM = os.environ.get("UPSTREAM_PROXY", "")  # optional http://host:port (dev only)
+UPSTREAM = os.environ.get("UPSTREAM_PROXY", "")
+POLICY_FILE = os.environ.get("POLICY_FILE", "")  # control plane empties it after install
+METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
+HOST_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$|^\[[0-9a-fA-F:]{2,45}\]$")
+_policy = {"mtime": None, "hosts": None}
+
+
+def current_allow():
+    """Allowlist from the control-plane policy file when present (hot-reloaded), else env."""
+    if POLICY_FILE:
+        try:
+            st = os.stat(POLICY_FILE)
+            if st.st_mtime_ns != _policy["mtime"]:
+                with open(POLICY_FILE) as fh:
+                    _policy["hosts"] = {h.strip().lower() for h in fh.read().split() if h.strip()}
+                _policy["mtime"] = st.st_mtime_ns
+            return _policy["hosts"]
+        except OSError:
+            pass
+    return ALLOW  # optional http://host:port (dev only)
 PORT = int(os.environ.get("PORT", "3128"))
 MAX_BODY_SCAN = 64 * 1024
 T0 = time.time()
@@ -66,7 +86,15 @@ def canary_hits(*blobs):
 
 def host_allowed(host):
     host = host.lower().rstrip(".")
-    return any(host == a or host.endswith("." + a) for a in ALLOW)
+    return any(host == a or host.endswith("." + a) for a in current_allow())
+
+
+def deny_reason(host):
+    if host_allowed(host):
+        return None
+    if host.lower().rstrip(".") in {h.lower() for h in ALLOW}:
+        return "registry_locked_after_install"
+    return "not_in_allowlist"
 
 
 def resolves_public(host, port):
@@ -140,6 +168,11 @@ async def handle(reader, writer):
     except ValueError:
         writer.close()
         return
+    if not METHOD_RE.match(method):
+        # Never echo attacker-chosen bytes into the log: they end up in the UI.
+        return await deny(writer, {"method": "INVALID", "host": "-", "port": 0,
+                                   "client": peer[0] if peer else None,
+                                   "canary_hit": canary_hits(head)}, "malformed_request")
     headers = {}
     for ln in lines[1:]:
         if ":" in ln:
@@ -148,11 +181,20 @@ async def handle(reader, writer):
 
     if method.upper() == "CONNECT":
         host, _, port = target.rpartition(":")
-        port = int(port or 443)
+        try:
+            port = int(port or 443)
+        except ValueError:
+            port = 0
+        hits = canary_hits(host, head)
+        if not HOST_RE.match(host or "") or not 0 < port < 65536:
+            return await deny(writer, {"method": "CONNECT", "host": "INVALID", "port": 0,
+                                       "client": peer[0] if peer else None, "canary_hit": hits},
+                              "malformed_request")
         rec = {"method": "CONNECT", "host": host, "port": port, "client": peer[0] if peer else None,
-               "canary_hit": canary_hits(host, head)}
-        if not host_allowed(host):
-            return await deny(writer, rec, "not_in_allowlist")
+               "canary_hit": hits}
+        reason = deny_reason(host)
+        if reason:
+            return await deny(writer, rec, reason)
         _, err = resolves_public(host, port)
         if err:
             return await deny(writer, rec, err)
@@ -172,21 +214,32 @@ async def handle(reader, writer):
         return
 
     # Plain HTTP (absolute-form request target)
-    url = urlsplit(target)
-    host = url.hostname or headers.get("host", "").split(":")[0]
-    port = url.port or 80
+    try:
+        url = urlsplit(target)
+        host = url.hostname or headers.get("host", "").split(":")[0]
+        port = url.port or 80
+    except ValueError:
+        url, host, port = urlsplit("http://invalid/"), "", 0
+    if not HOST_RE.match(host or ""):
+        return await deny(writer, {"method": method, "host": "INVALID", "port": 0,
+                                   "client": peer[0] if peer else None,
+                                   "canary_hit": canary_hits(target, head)}, "malformed_request")
     body = b""
-    clen = int(headers.get("content-length", "0") or 0)
+    try:
+        clen = max(0, int(headers.get("content-length", "0") or 0))
+    except ValueError:
+        clen = 0
     if clen:
         try:
             body = await asyncio.wait_for(reader.readexactly(min(clen, MAX_BODY_SCAN)), timeout=10)
         except Exception:
             body = b""
-    rec = {"method": method, "host": host, "port": port, "path": (url.path or "/")[:300],
+    rec = {"method": method, "host": host, "port": port, "path": re.sub(r"[^\w./%~+=&?-]", "_", url.path or "/")[:300],
            "client": peer[0] if peer else None, "body_bytes": clen,
            "canary_hit": canary_hits(target, head, body)}
-    if not host_allowed(host):
-        return await deny(writer, rec, "not_in_allowlist")
+    reason = deny_reason(host)
+    if reason:
+        return await deny(writer, rec, reason)
     ip, err = resolves_public(host, port)
     if err:
         return await deny(writer, rec, err)

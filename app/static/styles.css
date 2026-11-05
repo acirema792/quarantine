@@ -21,6 +21,7 @@
   --sans: "Archivo", system-ui, sans-serif;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0; background: var(--paper); color: var(--ink);
@@ -247,4 +248,12 @@ details summary { cursor: pointer; font-weight: 700; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+.token-form { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.token-form input { font: 13px var(--mono); padding: 7px 9px; border: 1.5px solid var(--ink); border-radius: 4px; }
+@media (max-width: 480px) {
+  .intake-row { flex-direction: column; }
+  .intake-row button { width: 100%; }
+  .layout { padding: 12px; }
 }
