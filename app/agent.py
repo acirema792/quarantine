@@ -31,6 +31,8 @@ ACTIVE: dict[str, "Run"] = {}
 _slots = threading.Semaphore(settings.max_concurrent)
 MAX_TELEMETRY_EVENTS = 4000  # per run, sandbox + proxy; beyond this we count, not store
 MAX_QUEUED = 12
+KEEP_ALWAYS = {"runner_start", "runner_done", "runner_error", "decoys_planted", "decoy_read", "fs_change",
+               "phase_start", "phase_end", "mcp_tool", "net_attempt", "telemetry_anomaly", "lingering_killed"}
 
 
 class QueueFull(RuntimeError):
@@ -49,12 +51,13 @@ class Run:
         self.events = []
         self.telemetry = 0
         self.dropped = 0
+        self.seen_egress = set()
 
     def emit(self, source, data):
         with self.lock:
             if source in ("sandbox", "proxy"):
                 self.telemetry += 1
-                if self.telemetry > MAX_TELEMETRY_EVENTS:
+                if self.telemetry > MAX_TELEMETRY_EVENTS and not self._evidential(data):
                     self.dropped += 1
                     if self.dropped == 1:
                         data = {"type": "telemetry_truncated", "limit": MAX_TELEMETRY_EVENTS}
@@ -71,6 +74,22 @@ class Run:
             self.events.append({**data, "_source": source})
         with self.cond:
             self.cond.notify_all()
+
+    def _evidential(self, data):
+        """Events that can change the verdict are never dropped by the flood cap. Repeated
+        egress to an already-seen host+verdict without decoys is only noise and is dropped;
+        the first record per host+verdict (and every one carrying a decoy) is kept."""
+        t = data.get("type")
+        if t in KEEP_ALWAYS:
+            return True
+        if t == "egress":
+            if data.get("canary_hit") or (data.get("bytes_out") or 0) > 0 or data.get("cut_by_policy"):
+                return True
+            key = (data.get("verdict"), data.get("host"), data.get("reason"))
+            if key not in self.seen_egress and len(self.seen_egress) < 500:
+                self.seen_egress.add(key)
+                return True
+        return False
 
     def step(self, name, status, **extra):
         self.emit("pipeline", {"type": "step", "step": name, "status": status, **extra})

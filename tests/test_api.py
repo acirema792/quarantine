@@ -105,3 +105,17 @@ def test_bad_specs_rejected(client):
 def test_hidden_test_fixtures_are_not_listed(client):
     names = {f["name"] for f in client.get("/api/fixtures").json()}
     assert "color-utils-pro" in names and "telemetry-forger" not in names
+
+
+def test_fixture_decisions_never_touch_real_policy(client):
+    rid = fake_done_run(source="fixture", name="color-utils-pro", version="4.2.1", verdict="MALICIOUS")
+    assert client.post(f"/api/runs/{rid}/decision", json={"decision": "approve"}).status_code == 200
+    g = client.get("/api/gate", params={"ecosystem": "npm", "name": "color-utils-pro", "version": "4.2.1"}).json()
+    assert g["decision"] == "unknown"
+
+
+def test_public_deployment_without_admin_token_refuses_real_decisions(client, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "")
+    monkeypatch.setattr(settings, "public_url", "https://demo.example")
+    rid = fake_done_run(source="registry", name="pub-pkg")
+    assert client.post(f"/api/runs/{rid}/decision", json={"decision": "approve"}).status_code == 403

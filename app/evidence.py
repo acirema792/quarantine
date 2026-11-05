@@ -56,6 +56,7 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
                     "source": source})
 
     decoys, denied, canary_hosts, allowed, locked_hits = set(), {}, set(), {}, set()
+    big_tunnels, held_open = [], set()
     stats = {}
     done_attempts, started_attempts, anomalies = set(), set(), []
     for ev in events:
@@ -73,7 +74,11 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
             if ev.get("canary_hit"):
                 canary_hosts.add(host)
         elif t == "egress" and ev.get("verdict") == "ALLOW":
-            allowed[ev.get("host")] = allowed.get(ev.get("host"), 0) + (ev.get("bytes_out") or 0)
+            out = ev.get("bytes_out") or 0
+            allowed[ev.get("host")] = allowed.get(ev.get("host"), 0) + out
+            big_tunnels.append(ev) if out > 64 * 1024 else None
+            if ev.get("cut_by_policy"):
+                held_open.add(ev.get("host"))
         elif t in ("telemetry_anomaly", "telemetry_truncated", "runner_error"):
             anomalies.append(ev)
         elif t == "net_attempt":
@@ -100,13 +105,15 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
                 "Killed by the runner timeout.", "ASI08")
 
     # Decoys: one credential read can be honest (an AWS SDK reads ~/.aws/credentials when
-    # called). Sweeping several stores, or reading one and then calling out, is not.
-    phoned_home = bool(denied) or bool(locked_hits)
+    # called, and may then fail to reach AWS). Conviction needs more: a decoy value seen in
+    # outbound traffic, a sweep of several stores, or a large upload.
     sweep = len(decoys) >= 3
+    uploaded = bool(big_tunnels)
     for d in sorted(decoys):
-        sev = "critical" if (sweep or phoned_home) else "high"
+        sev = "critical" if (sweep or canary_hosts or uploaded) else "high"
         why = ("One of several credential stores read in the same run." if sweep else
-               "Read, then an outbound connection was attempted." if phoned_home else
+               "Read, and a decoy value was then seen leaving." if canary_hosts else
+               "Read, then a large upload went out." if uploaded else
                "Planted honeytoken file. Some SDKs read this legitimately; review the call site.")
         add(sev, "decoy_read", f"Read decoy credential {d.replace('/home/dev', '~')}", why, "ASI03")
     for host in sorted(canary_hosts):
@@ -122,10 +129,13 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
             "Registries are only reachable while dependencies install; runtime traffic there was refused.",
             "ASI02")
     for host, out in sorted(allowed.items()):
-        if out > 256 * 1024:
+        if out > 256 * 1024 or any(t.get("host") == host for t in big_tunnels):
             add("high", "registry_upload", f"Uploaded {out // 1024} KB to {host}",
                 "Package downloads send a few KB of requests; this looks like publishing or a dead-drop.",
                 "ASI02")
+    for host in sorted(held_open):
+        add("medium", "registry_held_open", f"Kept a connection to {host} open past install",
+            "The proxy cut it when the registry was locked.", "ASI02")
 
     # Telemetry integrity: the runner is out of the package's reach (different uid), so a
     # missing summary or a forged/flooded stream is itself evidence.

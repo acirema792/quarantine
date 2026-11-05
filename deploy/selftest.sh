@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
-# Runs every sample shipment through the live control plane and prints the verdicts,
-# then the escape-artist red-team results. Usage: deploy/selftest.sh [base_url]
-set -euo pipefail
+# End-to-end check of a live deployment: every sample shipment must get its expected
+# verdict on the configured runtime, every escape probe must be blocked, every sandbox
+# must be torn down. Exits non-zero on any mismatch.  Usage: deploy/selftest.sh [base_url]
+set -uo pipefail
 BASE="${1:-http://127.0.0.1:8000}"
-py() { python3 -c "$1"; }
-for spec in fixture:escape-artist fixture:color-utils-pro fixture:mcp-weather-plus fixture:requestz fixture:turbo-build-cache fixture:left-padder; do
-  id=$(curl -fsS -X POST "$BASE/api/runs" -H 'content-type: application/json' -d "{\"spec\":\"$spec\"}" | py 'import json,sys;print(json.load(sys.stdin)["id"])')
-  until [ "$(curl -fsS "$BASE/api/runs/$id" | py 'import json,sys;print(json.load(sys.stdin)["status"])')" != "running" ] && \
-        [ "$(curl -fsS "$BASE/api/runs/$id" | py 'import json,sys;print(json.load(sys.stdin)["status"])')" != "queued" ]; do sleep 2; done
-  curl -fsS "$BASE/api/runs/$id" | py '
+fail=0
+declare -A EXPECT=( [escape-artist]=SUSPICIOUS [color-utils-pro]=MALICIOUS [mcp-weather-plus]=MALICIOUS
+                    [requestz]=MALICIOUS [turbo-build-cache]=MALICIOUS [left-padder]=CLEAN )
+get() { curl -fsS "$BASE$1"; }
+field() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+runtime=$(get /api/health | field 'd["engine"].get("runtime")')
+echo "runtime: $runtime   firewall: $(get /api/health | field 'd["engine"].get("host_firewall",{}).get("active")')"
+[ "$runtime" = "runsc" ] || { echo "WARN: not running under gVisor"; fail=1; }
+for name in escape-artist color-utils-pro mcp-weather-plus requestz turbo-build-cache left-padder; do
+  id=$(curl -fsS -X POST "$BASE/api/runs" -H 'content-type: application/json' -d "{\"spec\":\"fixture:$name\"}" | field 'd["id"]')
+  for _ in $(seq 1 120); do
+    st=$(get "/api/runs/$id" | field 'd["status"]'); [ "$st" = done ] || [ "$st" = error ] && break; sleep 3
+  done
+  line=$(get "/api/runs/$id" | python3 -c '
 import json,sys
-r=json.load(sys.stdin); rep=r.get("report") or {}
-d=(rep.get("detonation") or [{}])[-1]; p=d.get("proof") or {}
-print(f"{r[\"spec\"]:32} {r[\"status\"]:6} {str(r.get(\"verdict\")):11} score={r.get(\"score\")} runtime={p.get(\"runtime\")} teardown={d.get(\"teardown\",{}).get(\"verified\")}")
-if rep.get("error"): print("   error:", rep["error"])'
-  if [ "$spec" = "fixture:escape-artist" ]; then
-    curl -fsS "$BASE/api/runs/$id/events" | grep -o '"line": "ESCAPE[^"]*"' | sed 's/"line": //' | sed 's/^/   /'
+r=json.load(sys.stdin); rep=r.get("report") or {}; d=(rep.get("detonation") or [{}])[-1]
+print(r.get("verdict"), d.get("teardown",{}).get("verified"), (d.get("proof") or {}).get("runtime"))')
+  set -- $line
+  ok="ok"; { [ "$1" = "${EXPECT[$name]}" ] && [ "$2" = "True" ]; } || { ok="MISMATCH"; fail=1; }
+  printf '%-20s verdict=%-11s expected=%-11s teardown=%s runtime=%s  %s\n' "$name" "$1" "${EXPECT[$name]}" "$2" "$3" "$ok"
+  if [ "$name" = escape-artist ]; then
+    probes=$(get "/api/runs/$id/events" | grep -o '"line": "ESCAPE [^"]*"' | sed 's/"line": "//; s/"$//')
+    echo "$probes" | sed 's/^/    /'
+    echo "$probes" | grep -q SUCCEEDED && { echo "    ESCAPE SUCCEEDED"; fail=1; }
   fi
 done
+[ "$fail" = 0 ] && echo "SELFTEST PASSED" || echo "SELFTEST FAILED"
+exit $fail
