@@ -28,7 +28,7 @@ on_error() {
   local rc=$? line=$1
   {
     printf '%s  FAILED (exit %s) at install.sh line %s\n\n--- last log lines (redacted) ---\n' "$(date -u +%H:%M:%S)" "$rc" "$line"
-    tail -n 60 /var/log/quarantine-install.log 2>/dev/null | grep -viE 'token|api_key|apikey|secret|password' || true
+    tail -n 60 /var/log/quarantine-install.log "$BEACON/install.log" 2>/dev/null | grep -viE 'token|api_key|apikey|secret|password' || true
   } >> "$BEACON/index.txt"
 }
 trap 'on_error $LINENO' ERR
@@ -198,5 +198,5 @@ else
 fi
 echo
 echo "Quarantine is live at: https://$DOMAIN"
-echo "Admin token (needed to approve/block real packages): $(grep ^ADMIN_TOKEN= "$ENV_FILE" | cut -d= -f2)"
+echo "Admin token (needed to approve/block real packages) is ADMIN_TOKEN in $ENV_FILE"
 echo "Run the containment red-team:  sudo $APP_DIR/deploy/selftest.sh"
