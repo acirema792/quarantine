@@ -101,3 +101,14 @@ def test_hash_chain_and_signature_detect_tampering():
     receipt = {"verdict": "CLEAN", "events_root": hashes[-1]}
     sig = evidence.sign(receipt)
     assert evidence.sign(dict(receipt, verdict="MALICIOUS")) != sig
+
+
+def test_blocked_hosts_alone_never_convict():
+    evs = [{"type": "egress", "verdict": "DENY", "host": f"h{i}.example", "canary_hit": []} for i in range(5)]
+    a = assess(evs)
+    assert a["verdict"] == "SUSPICIOUS" and len([s for s in a["signals"] if s["kind"] == "egress_denied"]) == 1
+
+
+def test_leftover_daemon_is_scored():
+    a = assess([{"type": "lingering_killed", "phase": "install", "processes": 1}])
+    assert any(s["kind"] == "daemon" for s in a["signals"])

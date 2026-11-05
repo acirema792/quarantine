@@ -81,6 +81,9 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
                 held_open.add(ev.get("host"))
         elif t in ("telemetry_anomaly", "telemetry_truncated", "runner_error"):
             anomalies.append(ev)
+        elif t == "lingering_killed" and ev.get("phase") in ("install", "exercise"):
+            add("medium", "daemon", f"Left processes running after {ev.get('phase')}",
+                f"{ev.get('processes', '?')} background process(es) killed at the phase boundary.", "ASI05")
         elif t == "net_attempt":
             if not ev.get("dst", "").endswith(":3128"):
                 add("high", "direct_connect", f"Direct connection attempt to {ev['dst']} (no route out)",
@@ -120,9 +123,15 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
         add("critical", "exfil_attempt", f"Tried to send decoy credentials to {host}",
             "Decoy secret found in the outbound request. Blocked at the egress proxy — 0 bytes delivered.",
             "ASI02")
-    for host in sorted(set(denied) - canary_hosts):
-        add("high", "egress_denied", f"Outbound connection to {host} blocked",
-            f"{len(denied[host])} attempt(s); host not in allowlist.", "ASI02")
+    plain = sorted(set(denied) - canary_hosts)
+    if plain:
+        # One signal however many hosts: blocked calls alone are suspicious, not proof
+        # (telemetry, update checks and honest SDKs all try to reach the internet).
+        n = sum(len(denied[h]) for h in plain)
+        title = (f"Outbound connection to {plain[0]} blocked" if len(plain) == 1 else
+                 f"Outbound connections to {len(plain)} hosts blocked")
+        add("high", "egress_denied", title,
+            f"{n} attempt(s) to {', '.join(plain[:6])}{'…' if len(plain) > 6 else ''}; not in allowlist.", "ASI02")
 
     for host in sorted(locked_hits):
         add("high", "registry_after_install", f"Contacted {host} after install finished",

@@ -48,7 +48,9 @@ class Settings:
     max_package_mb = _int("MAX_PACKAGE_MB", 25)
     # Public demo mode: only bundled fixtures + real registry packages, no uploads.
     allow_registry_targets = os.environ.get("ALLOW_REGISTRY_TARGETS", "1") == "1"
-    admin_token = os.environ.get("ADMIN_TOKEN", "")  # protects approve/block when set
+    admin_token = os.environ.get("ADMIN_TOKEN", "")  # required to approve/block real packages
+    # Local development only: allow real-package decisions without a token.
+    allow_open_decisions = os.environ.get("ALLOW_OPEN_DECISIONS", "0") == "1"
     rate_limit_per_hour = _int("RATE_LIMIT_PER_HOUR", 30)
     public_url = os.environ.get("PUBLIC_URL", "")
 
