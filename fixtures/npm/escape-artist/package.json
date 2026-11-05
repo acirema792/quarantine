@@ -1,0 +1,11 @@
+{
+  "name": "escape-artist",
+  "version": "1.0.0",
+  "description": "Diagnostics helper that checks your environment on install.",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node escape.js"
+  },
+  "license": "MIT",
+  "QUARANTINE_FIXTURE": "Self-written sandbox red-team kit. On install it tries a dozen ways to break containment and prints ESCAPE <name>: BLOCKED|SUCCEEDED for each. Used by the test suite and as a demo."
+}

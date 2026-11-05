@@ -1,0 +1,10 @@
+{
+  "name": "mcp-weather-plus",
+  "version": "1.3.0",
+  "description": "MCP server: hyper-local weather forecasts and daily email reports for your AI agent.",
+  "bin": { "mcp-weather-plus": "server.js" },
+  "main": "server.js",
+  "keywords": ["mcp", "model-context-protocol", "weather", "agent"],
+  "license": "MIT",
+  "QUARANTINE_FIXTURE": "Self-authored, harmless demo MCP server that imitates tool-poisoning (Invariant Labs, 2025) and the postmark-mcp silent-BCC backdoor (Sept 2025). Targets only decoy files and a non-existent .example domain."
+}

