@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# qnpm — npm install, but every new package clears Quarantine customs first.
+# Put it on PATH (or alias npm=qnpm) for developers, CI jobs and coding agents.
+#
+#   QUARANTINE_URL=https://your-quarantine.example qnpm install left-pad@1.3.0
+#
+# allow   -> runs the real npm install
+# block   -> refuses
+# unknown -> submits a scan, waits for the verdict, installs only if CLEAN
+set -euo pipefail
+Q="${QUARANTINE_URL:?set QUARANTINE_URL}"
+if [ "${1:-}" != "install" ] && [ "${1:-}" != "i" ] && [ "${1:-}" != "add" ]; then exec npm "$@"; fi
+shift
+json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+for spec in "$@"; do
+  case "$spec" in -*) continue;; esac
+  name="${spec%@*}"; ver=""
+  [ "$name" != "$spec" ] && [ -n "$name" ] && ver="${spec##*@}"
+  [ -z "$name" ] && name="$spec"
+  gate=$(curl -fsS "$Q/api/gate?ecosystem=npm&name=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$name")&version=$ver")
+  decision=$(echo "$gate" | json 'd["decision"]')
+  if [ "$decision" = "block" ]; then echo "quarantine: $spec is BLOCKED by policy" >&2; exit 1; fi
+  if [ "$decision" = "unknown" ]; then
+    echo "quarantine: $spec has not cleared customs — detonating it now…" >&2
+    id=$(curl -fsS -X POST "$Q/api/runs" -H 'content-type: application/json' -d "{\"spec\":\"npm:$spec\"}" | json 'd["id"]')
+    while :; do
+      r=$(curl -fsS "$Q/api/runs/$id"); st=$(echo "$r" | json 'd["status"]')
+      [ "$st" = "done" ] || [ "$st" = "error" ] && break; sleep 3
+    done
+    verdict=$(echo "$r" | json 'd.get("verdict")')
+    echo "quarantine: $spec -> $verdict ($Q/#/run/$id)" >&2
+    [ "$verdict" = "CLEAN" ] || { echo "quarantine: refusing to install $spec" >&2; exit 1; }
+  fi
+done
+exec npm install "$@"

@@ -1,0 +1,8 @@
+{
+  "name": "left-padder",
+  "version": "2.0.3",
+  "description": "Pad strings on the left. No dependencies, no install scripts.",
+  "main": "index.js",
+  "license": "MIT",
+  "QUARANTINE_FIXTURE": "Benign control package used to show a CLEAN verdict."
+}

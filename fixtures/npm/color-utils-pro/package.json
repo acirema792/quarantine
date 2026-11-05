@@ -1,0 +1,12 @@
+{
+  "name": "color-utils-pro",
+  "version": "4.2.1",
+  "description": "Fast, tiny color conversion helpers (hex, rgb, hsl).",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node scripts/setup.js"
+  },
+  "keywords": ["color", "hex", "rgb", "hsl"],
+  "license": "MIT",
+  "QUARANTINE_FIXTURE": "Self-authored, harmless demo package that imitates the behaviour of the 2025 Shai-Hulud npm worm. It only targets decoy files and a non-existent .example domain."
+}
