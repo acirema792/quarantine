@@ -102,6 +102,9 @@ def test_telemetry_channel_cannot_be_forged_killed_or_flooded():
     assert r["report"]["assessment"]["verdict"] == "MALICIOUS"  # swept 3 credential stores
     out_events = [e for e in events if e.get("type") == "output"]
     assert len(out_events) < 2000  # flood was bounded by the runner, not stored line by line
+    # a setsid daemon disguised as "runner.py" is still seen and still killed between phases
+    assert any("runner.py" in e.get("cmd", "") for e in events if e.get("type") == "proc")
+    assert any(e.get("type") == "lingering_killed" for e in events)
 
 
 def test_honest_sdk_reading_aws_credentials_is_not_convicted():

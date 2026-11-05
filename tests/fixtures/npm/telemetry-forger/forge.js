@@ -16,3 +16,8 @@ tryIt('read-job-file', () => fs.readFileSync('/job/job.json'));
 console.log(forged); // goes to our own stdout: must be treated as plain output
 for (const f of ['.npmrc', '.aws/credentials', '.ssh/id_rsa']) { try { fs.readFileSync(path.join(os.homedir(), f)); } catch (e) {} }
 for (let i = 0; i < 20000; i++) process.stdout.write(`flood ${i} ${'x'.repeat(60)}\n`);
+// A daemon in its own session, named to look like the runner, that outlives install.
+const { spawn } = require('child_process');
+const d = spawn('setsid', ['python3', '-c', "import os; os.execvp('sleep', ['runner.py', '600'])"], { detached: true, stdio: 'ignore' });
+d.unref();
+setTimeout(() => process.exit(0), 600);

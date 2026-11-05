@@ -37,7 +37,8 @@ _policy = {"mtime": None, "hosts": None}
 
 
 def current_allow():
-    """Allowlist from the control-plane policy file when present (hot-reloaded), else env."""
+    """Allowlist from the control-plane policy file when configured (hot-reloaded), else env.
+    Fails closed: if a policy file is configured but unreadable, nothing is allowed."""
     if POLICY_FILE:
         try:
             st = os.stat(POLICY_FILE)
@@ -47,8 +48,28 @@ def current_allow():
                 _policy["mtime"] = st.st_mtime_ns
             return _policy["hosts"]
         except OSError:
-            pass
-    return ALLOW  # optional http://host:port (dev only)
+            return set()
+    return ALLOW
+
+
+TUNNELS = {}  # open CONNECT tunnels: id -> (host, client_writer, upstream_writer, record)
+
+
+async def enforce_policy():
+    """When the allowlist shrinks (registry locked after install), cut tunnels that were
+    opened earlier: a background process must not keep a registry socket as a dead-drop."""
+    while True:
+        await asyncio.sleep(0.25)
+        for key, t in list(TUNNELS.items()):
+            host, cw, uw, rec = t
+            if not host_allowed(host):
+                rec["cut_by_policy"] = True
+                for w in (cw, uw):
+                    try:
+                        w.close()
+                    except Exception:
+                        pass
+                TUNNELS.pop(key, None)
 PORT = int(os.environ.get("PORT", "3128"))
 MAX_BODY_SCAN = 64 * 1024
 T0 = time.time()
@@ -208,7 +229,11 @@ async def handle(reader, writer):
         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await writer.drain()
         counter = {"out": 0, "in": 0}
-        await asyncio.gather(pipe(reader, uw, counter, "out"), pipe(ur, writer, counter, "in"))
+        TUNNELS[id(rec)] = (host, writer, uw, rec)
+        try:
+            await asyncio.gather(pipe(reader, uw, counter, "out"), pipe(ur, writer, counter, "in"))
+        finally:
+            TUNNELS.pop(id(rec), None)
         rec.update({"verdict": "ALLOW", "bytes_out": counter["out"], "bytes_in": counter["in"]})
         log(**rec)
         return
@@ -264,6 +289,7 @@ async def handle(reader, writer):
 
 async def main():
     server = await asyncio.start_server(handle, "0.0.0.0", PORT)
+    asyncio.get_running_loop().create_task(enforce_policy())
     log(method="-", host="-", port=PORT, verdict="READY", allow=sorted(ALLOW), canaries=len(CANARIES))
     async with server:
         await server.serve_forever()

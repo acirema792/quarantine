@@ -9,8 +9,34 @@
 # unknown -> submits a scan, waits for the verdict, installs only if CLEAN
 set -euo pipefail
 Q="${QUARANTINE_URL:?set QUARANTINE_URL}"
-if [ "${1:-}" != "install" ] && [ "${1:-}" != "i" ] && [ "${1:-}" != "add" ]; then exec npm "$@"; fi
-shift
+case "${1:-}" in
+  install|i|add|ci) ;;
+  *) exec npm "$@" ;;
+esac
+cmd="$1"; shift
+pkgs=0; for a in "$@"; do case "$a" in -*) ;; *) pkgs=$((pkgs+1));; esac; done
+if [ "$cmd" = "ci" ] || [ "$pkgs" = 0 ]; then
+  # Installing from a lockfile: every pinned package must already be approved.
+  [ -f package-lock.json ] || { echo "quarantine: no package-lock.json; run qnpm install <pkg>" >&2; exit 1; }
+  missing=$(python3 - "$Q" <<'PY'
+import json, sys, urllib.parse, urllib.request
+q = sys.argv[1]
+lock = json.load(open("package-lock.json"))
+bad = []
+for path, meta in (lock.get("packages") or {}).items():
+    if not path or not meta.get("version"):
+        continue
+    name = path.split("node_modules/")[-1]
+    url = f"{q}/api/gate?ecosystem=npm&name={urllib.parse.quote(name)}&version={urllib.parse.quote(meta['version'])}"
+    d = json.load(urllib.request.urlopen(url, timeout=20))
+    if d.get("decision") != "allow" or (d.get("integrity") and meta.get("integrity") and d["integrity"] != meta["integrity"]):
+        bad.append(f"{name}@{meta['version']} ({d.get('decision')})")
+print("\n".join(bad))
+PY
+)
+  if [ -n "$missing" ]; then echo "quarantine: not cleared:" >&2; echo "$missing" | sed 's/^/  /' >&2; exit 1; fi
+  exec npm "$cmd" "$@"
+fi
 json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 for spec in "$@"; do
   case "$spec" in -*) continue;; esac
@@ -23,6 +49,12 @@ for spec in "$@"; do
   gate=$(curl -fsS "$Q/api/gate?ecosystem=npm&name=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$name")&version=$ver")
   decision=$(echo "$gate" | json 'd["decision"]')
   if [ "$decision" = "block" ]; then echo "quarantine: $spec is BLOCKED by policy" >&2; exit 1; fi
+  if [ "$decision" = "allow" ]; then
+    # The approval is for specific bytes: make sure the registry still serves those bytes.
+    want=$(echo "$gate" | json 'd.get("integrity","")')
+    have=$(npm view "$spec" dist.integrity 2>/dev/null || true)
+    if [ -n "$want" ] && [ "$want" != "$have" ]; then echo "quarantine: $spec integrity changed since approval" >&2; exit 1; fi
+  fi
   if [ "$decision" = "unknown" ]; then
     echo "quarantine: $spec has not cleared customs — detonating it now…" >&2
     id=$(curl -fsS -X POST "$Q/api/runs" -H 'content-type: application/json' -d "{\"spec\":\"npm:$spec\"}" | json 'd["id"]')

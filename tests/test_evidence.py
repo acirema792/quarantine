@@ -27,9 +27,18 @@ def test_credential_sweep_is_malicious():
     assert a["verdict"] == "MALICIOUS"
 
 
-def test_read_then_phone_home_is_malicious():
-    deny = {"type": "egress", "verdict": "DENY", "host": "x.example", "canary_hit": []}
-    assert assess([_read(".aws/credentials"), deny])["verdict"] == "MALICIOUS"
+def test_read_plus_blocked_call_is_suspicious_but_leaking_the_value_is_malicious():
+    deny = {"type": "egress", "verdict": "DENY", "host": "sts.amazonaws.com", "canary_hit": []}
+    assert assess([_read(".aws/credentials"), deny])["verdict"] == "SUSPICIOUS"  # honest SDK, no network
+    leak = {"type": "egress", "verdict": "DENY", "host": "x.example", "canary_hit": ["AKIA12…"]}
+    assert assess([_read(".aws/credentials"), leak])["verdict"] == "MALICIOUS"
+
+
+def test_tunnel_held_past_lock_and_big_install_upload_are_flagged():
+    evs = [{"type": "egress", "verdict": "ALLOW", "host": "registry.npmjs.org", "bytes_out": 90_000,
+            "cut_by_policy": True}]
+    kinds = {s["kind"] for s in assess(evs)["signals"]}
+    assert {"registry_upload", "registry_held_open"} <= kinds
 
 
 def test_missing_runner_summary_is_tampering():

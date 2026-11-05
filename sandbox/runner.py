@@ -153,6 +153,37 @@ def watch_decoys(paths, stop):
 TCP_STATES = {"01": "ESTABLISHED", "02": "SYN_SENT"}
 
 
+def _uid_of(pid):
+    try:
+        with open(f"/proc/{pid}/status") as fh:
+            for line in fh:
+                if line.startswith("Uid:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def kill_package_processes(rounds=6):
+    """Kill EVERY process running as the package uid, whatever session or process group
+    it moved itself into (setsid/daemonize can't escape this). Returns processes killed."""
+    killed = 0
+    for _ in range(rounds):
+        found = 0
+        for p in os.listdir("/proc"):
+            if p.isdigit() and _uid_of(int(p)) == DEV_UID:
+                found += 1
+                try:
+                    os.kill(int(p), signal.SIGKILL)
+                    killed += 1
+                except OSError:
+                    pass
+        if not found:
+            break
+        time.sleep(0.1)
+    return killed
+
+
 def _hex_to_addr(h):
     ip_hex, port_hex = h.split(":")
     port = int(port_hex, 16)
@@ -185,7 +216,9 @@ def sample_proc(stop, self_pids, stats):
                     cmd = fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
             except OSError:
                 continue
-            if not cmd or "runner.py" in cmd or CURRENT_PHASE[0] == "init":
+            # Only package code (uid 10001) is reported. Filtering by uid, not by name,
+            # means a package cannot hide a process by putting "runner.py" in its argv.
+            if not cmd or CURRENT_PHASE[0] == "init" or _uid_of(pid) != DEV_UID:
                 continue
             stats["procs_total"] += 1
             if proc_events < MAX_PROC_EVENTS:
@@ -207,6 +240,8 @@ def sample_proc(stop, self_pids, stats):
                 if remote.startswith("0.0.0.0") or remote in seen_conns:
                     continue
                 seen_conns.add(remote)
+                if len(seen_conns) > 100:
+                    continue  # bounded: a scan of the address space is already evident
                 emit("net_attempt", dst=remote, state=TCP_STATES[cols[3]], phase=CURRENT_PHASE[0])
         time.sleep(0.1)
     stats["proc_events_suppressed"] = suppressed
@@ -273,7 +308,7 @@ def _run_phase(name, argv, timeout, cwd=WORK, env=None, stdin_data=None):
         proc = subprocess.Popen(
             argv, cwd=cwd, env=env, stdin=subprocess.PIPE if stdin_data else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
-            preexec_fn=drop_privileges, umask=0o022,
+            user=DEV_UID, group=DEV_GID, extra_groups=[], umask=0o022,
         )
     except OSError as exc:
         emit("phase_end", phase=name, exit_code=None, error=str(exc), seconds=0)
@@ -303,12 +338,7 @@ def _run_phase(name, argv, timeout, cwd=WORK, env=None, stdin_data=None):
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        for _ in range(5):  # process groups that keep forking need repeated kills
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                break
-            time.sleep(0.2)
+        kill_package_processes(rounds=12)  # forking trees need repeated sweeps
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -316,16 +346,9 @@ def _run_phase(name, argv, timeout, cwd=WORK, env=None, stdin_data=None):
     th.join(timeout=2)
     # Lifecycle discipline inside the box too: nothing a phase started may linger
     # into the next phase (e.g. a daemon spawned by a postinstall script).
-    lingering = 0
-    for _ in range(5):
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-            lingering += 1
-        except OSError:
-            break
-        time.sleep(0.1)
+    lingering = kill_package_processes()
     if lingering:
-        emit("lingering_killed", phase=name, rounds=lingering)
+        emit("lingering_killed", phase=name, processes=lingering)
     res = {
         "exit_code": proc.returncode,
         "timed_out": timed_out,
@@ -370,7 +393,8 @@ def _mcp_probe(command, env, timeout):
     try:
         proc = subprocess.Popen(command, cwd=WORK, env=env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                start_new_session=True, preexec_fn=drop_privileges, umask=0o022)
+                                start_new_session=True, user=DEV_UID, group=DEV_GID, extra_groups=[],
+                                umask=0o022)
     except OSError as exc:
         emit("phase_end", phase="mcp", exit_code=None, error=str(exc), seconds=0)
         return {"error": str(exc)}
@@ -438,10 +462,7 @@ def _mcp_probe(command, env, timeout):
             time.sleep(0.5)  # give side effects a moment to show up in telemetry
     else:
         emit("monitor_warning", what="MCP server did not answer initialize")
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except OSError:
-        pass
+    kill_package_processes()
     emit("phase_end", phase="mcp", exit_code=proc.poll(), seconds=round(time.time() - t0, 2))
     return result
 

@@ -119,7 +119,9 @@ def run_detail(run_id: str):
     if not r:
         raise HTTPException(404, "not found")
     r.pop("client", None)
-    r["policy"] = store.get_policy(r.get("ecosystem"), r.get("name"), r.get("version")) if r.get("name") else None
+    is_fixture = ((r.get("report") or {}).get("target") or {}).get("source") == "fixture"
+    eco = f"fixture-{r.get('ecosystem')}" if is_fixture else r.get("ecosystem")
+    r["policy"] = store.get_policy(eco, r.get("name"), r.get("version")) if r.get("name") else None
     return r
 
 
@@ -198,12 +200,18 @@ def decide(run_id: str, body: DecisionIn, req: Request):
     is_fixture = ((r.get("report") or {}).get("target") or {}).get("source") == "fixture"
     # Policy for real packages is an admin decision. Sample shipments stay open so anyone
     # can try the approval flow on the public demo without touching real policy.
-    if settings.admin_token and not is_fixture and not hmac.compare_digest(
-            req.headers.get("x-admin-token", ""), settings.admin_token):
-        raise HTTPException(403, "admin token required to set policy for real packages")
-    store.set_policy(r["ecosystem"], r["name"], r["version"], r["sha256"],
+    if not is_fixture:
+        if not settings.admin_token and settings.public_url:
+            raise HTTPException(403, "admin token required: set ADMIN_TOKEN on public deployments")
+        if settings.admin_token and not hmac.compare_digest(
+                req.headers.get("x-admin-token", ""), settings.admin_token):
+            raise HTTPException(403, "admin token required to set policy for real packages")
+    # Sample shipments live in their own namespace, so approving the demo "color-utils-pro"
+    # can never make the gate allow a real npm package of the same name.
+    eco = f"fixture-{r['ecosystem']}" if is_fixture else r["ecosystem"]
+    store.set_policy(eco, r["name"], r["version"], r["sha256"],
                      "allow" if body.decision == "approve" else "block", body.note, run_id, r["verdict"])
-    return {"ok": True, "policy": store.get_policy(r["ecosystem"], r["name"], r["version"])}
+    return {"ok": True, "policy": store.get_policy(eco, r["name"], r["version"])}
 
 
 @app.get("/api/policy")
@@ -223,7 +231,10 @@ def gate(ecosystem: str, name: str, version: str = ""):
         return {"decision": "unknown", "error": "exact version required", "last_scan": last}
     p = store.get_policy(ecosystem, name, version)
     if p:
+        run = store.get_run(p["run_id"]) or {}
+        integrity = (((run.get("report") or {}).get("target")) or {}).get("integrity", "")
         return {"decision": p["decision"], "version": p["version"], "sha256": p["sha256"],
+                "integrity": integrity,
                 "run_id": p["run_id"], "verdict": p["verdict"]}
     last = store.q("SELECT id, verdict, version FROM runs WHERE ecosystem=? AND name=? AND status='done' "
                    "ORDER BY finished DESC LIMIT 1", (ecosystem, name), one=True)

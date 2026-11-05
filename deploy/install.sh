@@ -52,8 +52,12 @@ json.dump(d, open(p, "w"), indent=2)
 PY
 systemctl restart docker
 docker info --format '{{json .Runtimes}}' | grep -q runsc && echo "runsc registered with Docker"
-docker run --rm --runtime=runsc --network none busybox:1.36 uname -a | grep -qi gvisor \
-  || docker run --rm --runtime=runsc --network none busybox:1.36 dmesg | head -3 || true
+# gVisor smoke test: must start a container and report the gVisor kernel. Fail loudly.
+if ! docker run --rm --runtime=runsc --network none busybox:1.36 dmesg 2>/dev/null | grep -qi gvisor; then
+  echo "FATAL: runsc did not start a gVisor sandbox. Check: journalctl -u docker -n 50" >&2
+  exit 1
+fi
+echo "gVisor OK: $(docker run --rm --runtime=runsc --network none busybox:1.36 dmesg | head -1)"
 
 log "Application code"
 if [ -d "$APP_DIR/.git" ]; then
@@ -80,7 +84,7 @@ if [ ! -f "$ENV_FILE" ]; then
   umask 077
   cat > "$ENV_FILE" <<EOF
 VULTR_INFERENCE_API_KEY=${VULTR_INFERENCE_API_KEY:-}
-VULTR_MODEL=${VULTR_MODEL:-kimi-k2-instruct,kimi-k2.6,glm-5.3,deepseek-v4.1-flash,qwen3.8-flash-next}
+VULTR_MODEL=${VULTR_MODEL:-kimi-k2.6,glm-5.3,deepseek-v4.1-flash,kimi-k2-instruct,glm-5.2,qwen3.8-flash-next}
 DATA_DIR=$DATA_DIR
 SANDBOX_RUNTIME=runsc
 SANDBOX_MEMORY=1g
