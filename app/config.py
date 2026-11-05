@@ -19,7 +19,7 @@ class Settings:
     # Comma-separated preference list; first one present in /v1/models wins.
     model_prefs = [m.strip() for m in os.environ.get(
         "VULTR_MODEL",
-        "kimi-k2.6,glm-5.3,deepseek-v4.1-flash,kimi-k2-instruct,glm-5.2,qwen3.8-flash-next,gpt-oss-120b",
+        "glm-5.3,deepseek-v4.1-flash-1017,qwen3.8-flash-next,mimo-v2.6-pro,glm-5.3-flash,minimax-m3.1-flash",
     ).split(",") if m.strip()]
     llm_timeout = _int("LLM_TIMEOUT", 90)
 

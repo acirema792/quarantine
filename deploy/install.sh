@@ -84,7 +84,7 @@ if [ ! -f "$ENV_FILE" ]; then
   umask 077
   cat > "$ENV_FILE" <<EOF
 VULTR_INFERENCE_API_KEY=${VULTR_INFERENCE_API_KEY:-}
-VULTR_MODEL=${VULTR_MODEL:-kimi-k2.6,glm-5.3,deepseek-v4.1-flash,kimi-k2-instruct,glm-5.2,qwen3.8-flash-next}
+VULTR_MODEL=${VULTR_MODEL:-glm-5.3,deepseek-v4.1-flash-1017,qwen3.8-flash-next,mimo-v2.6-pro,glm-5.3-flash,minimax-m3.1-flash}
 DATA_DIR=$DATA_DIR
 SANDBOX_RUNTIME=runsc
 SANDBOX_MEMORY=1g
