@@ -120,17 +120,23 @@ async function loadStats() {
 // ---------------------------------------------------------------- run view
 async function submit(spec) {
   const btn = $("#go");
+  const label = btn.textContent;
   btn.disabled = true;
+  btn.textContent = "Starting…";
+  $("#banner").hidden = true;
   try {
     const { id } = await api("/api/runs", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec }),
     });
+    window.scrollTo({ top: 0, behavior: "smooth" });
     location.hash = `#/run/${id}`;
   } catch (e) {
     $("#banner").textContent = `Could not start the inspection: ${e.message}`;
     $("#banner").hidden = false;
+    $("#banner").scrollIntoView({ behavior: "smooth", block: "center" });
   } finally {
     btn.disabled = false;
+    btn.textContent = label;
   }
 }
 
@@ -158,11 +164,13 @@ function resetRunView() {
 function openRun(id) {
   if (current && current.es) current.es.close();
   resetRunView();
+  window.scrollTo({ top: 0 });
   current = { id, state: { peakPids: 0, bytesOut: 0, hosts: {}, procs: 0, events: 0, lastSeq: -1 } };
   loadHistory();
   const es = new EventSource(`/api/runs/${id}/events`);
   current.es = es;
   es.onmessage = (m) => {
+    if (!current || current.id !== id) { es.close(); return; }  // a run the user has left
     const ev = JSON.parse(m.data);
     if (typeof ev.seq !== "number" || ev.seq <= current.state.lastSeq) return; // dedupe on reconnect
     current.state.lastSeq = ev.seq;
@@ -171,7 +179,7 @@ function openRun(id) {
     if (!(ev.source in TRUSTED_SOURCES)) return;
     handle(ev);
   };
-  es.addEventListener("end", async () => { es.close(); await finish(id); });
+  es.addEventListener("end", async () => { es.close(); if (current && current.id === id) await finish(id); });
   es.onerror = () => { /* EventSource retries on its own */ };
 }
 
@@ -414,6 +422,7 @@ function renderPlan(ev) {
 async function finish(id) {
   const r = await api(`/api/runs/${id}`);
   loadHistory(); loadStats();
+  if (!current || current.id !== id) return;  // the user opened another run meanwhile
   if (r.status !== "done") return;
   const rep = r.report, a = rep.assessment, x = rep.explanation;
   // verdict
