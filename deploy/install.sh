@@ -205,8 +205,14 @@ EOF
 fi
 IP=$(curl -fsS http://169.254.169.254/v1/interfaces/0/ipv4/address 2>/dev/null || curl -fsS https://api.ipify.org)
 DOMAIN="${DOMAIN:-${IP//./-}.sslip.io}"
+# With an ACME account email Caddy can fall back from Let's Encrypt to ZeroSSL (e.g. once a
+# hostname has used Let's Encrypt's 5 certificates a week). Passed in by the operator, never committed.
+GLOBAL=""
+if [ -n "${ACME_EMAIL:-}" ]; then
+  printf -v GLOBAL '{\n  email %s\n}\n' "$ACME_EMAIL"
+fi
 cat > /etc/caddy/Caddyfile <<EOF
-$DOMAIN {
+$GLOBAL$DOMAIN {
   encode gzip
   reverse_proxy 127.0.0.1:8000 {
     flush_interval -1
@@ -223,6 +229,31 @@ systemctl enable caddy
 systemctl restart caddy || { journalctl -u caddy -n 25 --no-pager | grep -viE 'token|key' ; true; }
 ufw allow 80/tcp >/dev/null 2>&1 || true
 ufw allow 443/tcp >/dev/null 2>&1 || true
+
+log "Self-updater: pulls $BRANCH every 3 minutes, so code fixes deploy without a reinstall"
+cat > /etc/systemd/system/quarantine-update.service <<EOF
+[Unit]
+Description=Quarantine self-update from git
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+Environment=BRANCH=$BRANCH
+ExecStart=/bin/bash $APP_DIR/deploy/update.sh
+EOF
+cat > /etc/systemd/system/quarantine-update.timer <<EOF
+[Unit]
+Description=Check for Quarantine updates
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=3min
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now quarantine-update.timer
 
 log "Self-test"
 for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1 && break; sleep 1; done
