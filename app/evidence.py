@@ -87,7 +87,7 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
             if ev.get("resource") == "processes":
                 add("critical", "resource_exhaustion",
                     f"Process explosion: {ev.get('count')} processes during {ev.get('phase')} (budget {ev.get('cap')})",
-                    "Fork-bomb behaviour: the in-sandbox guard killed the process tree at 90% of the budget.", "ASI08")
+                    "Fork-bomb behaviour: the in-sandbox guard killed the process tree at half the budget.", "ASI08")
             else:
                 add("high", "resource_exhaustion",
                     f"Memory balloon: {ev.get('rss_mb')} MB during {ev.get('phase')} (cap {ev.get('cap_mb')} MB)",

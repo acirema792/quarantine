@@ -202,11 +202,10 @@ GUARD = {"processes": False, "memory": False, "phase": None}
 
 
 def _limit_nproc():
-    """Runs in the child before exec. RLIMIT_NPROC counts threads too (node alone has ~10), so
-    the kernel limit is a backstop at twice the budget; the guard trips first, on processes."""
+    """Runs in the child before exec: the package uid may own at most `nproc` tasks. Measured
+    on gVisor: any looser and a fork bomb takes the sandbox kernel down with it."""
     if LIMITS["nproc"]:
-        lim = LIMITS["nproc"] * 2
-        resource.setrlimit(resource.RLIMIT_NPROC, (lim, lim))
+        resource.setrlimit(resource.RLIMIT_NPROC, (LIMITS["nproc"], LIMITS["nproc"]))
 
 
 def _rss_mb(pid):
@@ -222,7 +221,8 @@ def resource_guard(pids, stats):
 
     Under gVisor the container's pids/memory cgroups also bound the sandbox kernel itself,
     so a fork bomb or memory balloon can take the whole sandbox down before anything is
-    reported. Catching it here (90% of the process budget, 80% of memory) keeps the evidence."""
+    reported. Catching it here keeps the evidence. RLIMIT_NPROC counts threads too, so the
+    process trigger sits at half the budget (honest installs stay far below it)."""
     dev = [p for p in pids if _uid_of(p) == DEV_UID]
     stats["dev_pids_peak"] = max(stats.get("dev_pids_peak", 0), len(dev))
     if not dev:
@@ -232,7 +232,7 @@ def resource_guard(pids, stats):
         return
     cap, mem_cap = LIMITS["nproc"], LIMITS["mem_mb"]
     hits = []
-    if cap and not GUARD["processes"] and len(dev) >= int(cap * 0.9):
+    if cap and not GUARD["processes"] and len(dev) >= cap // 2:
         hits.append(dict(resource="processes", count=len(dev), cap=cap))
     if mem_cap and not GUARD["memory"]:
         rss = sum(_rss_mb(p) for p in dev)
