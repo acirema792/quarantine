@@ -81,6 +81,15 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
                 held_open.add(ev.get("host"))
         elif t in ("telemetry_anomaly", "telemetry_truncated", "runner_error"):
             anomalies.append(ev)
+        elif t == "resource_exhausted":
+            if ev.get("resource") == "processes":
+                add("critical", "resource_exhaustion",
+                    f"Process explosion: {ev.get('count')} processes during {ev.get('phase')} (budget {ev.get('cap')})",
+                    "Fork-bomb behaviour: the in-sandbox guard killed the process tree at 90% of the budget.", "ASI08")
+            else:
+                add("high", "resource_exhaustion",
+                    f"Memory balloon: {ev.get('rss_mb')} MB during {ev.get('phase')} (cap {ev.get('cap_mb')} MB)",
+                    "The in-sandbox guard killed the package at 80% of the memory cap.", "ASI08")
         elif t == "lingering_killed" and ev.get("phase") in ("install", "exercise"):
             add("medium", "daemon", f"Left processes running after {ev.get('phase')}",
                 f"{ev.get('processes', '?')} background process(es) killed at the phase boundary.", "ASI05")
@@ -162,6 +171,12 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
         add("critical", "resource_exhaustion",
             f"Process explosion: {stats.get('procs_total', peak_pids)} processes spawned (cap {pids_limit})",
             "Fork-bomb behaviour contained by the pids cgroup limit.", "ASI08")
+    if det.get("runtime") == "runsc" and det.get("exit_code") == 2 and missing:
+        # gVisor's sentry is a Go program: exit 2 is a Go fatal error, i.e. the sandbox kernel
+        # itself ran out of threads or memory. Packages cannot cause that by being slow.
+        add("high", "resource_exhaustion", "Sandbox kernel killed by resource exhaustion",
+            "gVisor's sentry exited mid-phase (code 2): the package exhausted the sandbox's process "
+            "or memory budget. Contained; the host was unaffected.", "ASI08")
     if det.get("oom_killed"):
         add("high", "resource_exhaustion", "Memory cap hit (OOM-killed)", "Contained by the memory cgroup.", "ASI08")
     if det.get("killed_wall_clock"):

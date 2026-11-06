@@ -22,6 +22,7 @@ write to the pipes the runner gives it, and those are parsed as plain output.
 import ctypes
 import ctypes.util
 import json
+import resource
 import os
 import signal
 import struct
@@ -196,6 +197,49 @@ def _hex_to_addr(h):
     return f"{ip}:{port}"
 
 
+LIMITS = {"nproc": 0, "mem_mb": 0}  # set from the job: the package's process and memory budget
+GUARD = {"processes": False, "memory": False}
+
+
+def _limit_nproc():  # runs in the child before exec: the package uid may own at most `nproc` processes
+    if LIMITS["nproc"]:
+        resource.setrlimit(resource.RLIMIT_NPROC, (LIMITS["nproc"], LIMITS["nproc"]))
+
+
+def _rss_mb(pid):
+    try:
+        with open(f"/proc/{pid}/statm") as fh:
+            return int(fh.read().split()[1]) * resource.getpagesize() / 1048576
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def resource_guard(pids, stats):
+    """Enforce the package's budgets from inside the sandbox, whatever the runtime.
+
+    Under gVisor the container's pids/memory cgroups also bound the sandbox kernel itself,
+    so a fork bomb or memory balloon can take the whole sandbox down before anything is
+    reported. Catching it here (90% of the process budget, 80% of memory) keeps the evidence."""
+    dev = [p for p in pids if _uid_of(p) == DEV_UID]
+    stats["dev_pids_peak"] = max(stats.get("dev_pids_peak", 0), len(dev))
+    if not dev:
+        return
+    cap, mem_cap = LIMITS["nproc"], LIMITS["mem_mb"]
+    hits = []
+    if cap and not GUARD["processes"] and len(dev) >= int(cap * 0.9):
+        hits.append(dict(resource="processes", count=len(dev), cap=cap))
+    if mem_cap and not GUARD["memory"]:
+        rss = sum(_rss_mb(p) for p in dev)
+        stats["dev_rss_peak_mb"] = max(stats.get("dev_rss_peak_mb", 0), round(rss))
+        if rss >= mem_cap * 0.8:
+            hits.append(dict(resource="memory", rss_mb=round(rss), cap_mb=mem_cap))
+    for h in hits:
+        GUARD[h["resource"]] = True
+        emit("resource_exhausted", phase=CURRENT_PHASE[0], **h)
+    if hits:
+        kill_package_processes(rounds=20)
+
+
 def sample_proc(stop, self_pids, stats):
     seen_pids = set()
     seen_conns = set()
@@ -207,6 +251,7 @@ def sample_proc(stop, self_pids, stats):
         except OSError:
             pids = []
         stats["pids_peak"] = max(stats["pids_peak"], len(pids))
+        resource_guard(pids, stats)
         for pid in pids:
             if pid in seen_pids or pid in self_pids:
                 continue
@@ -308,7 +353,7 @@ def _run_phase(name, argv, timeout, cwd=WORK, env=None, stdin_data=None):
         proc = subprocess.Popen(
             argv, cwd=cwd, env=env, stdin=subprocess.PIPE if stdin_data else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
-            user=DEV_UID, group=DEV_GID, extra_groups=[], umask=0o022,
+            user=DEV_UID, group=DEV_GID, extra_groups=[], umask=0o022, preexec_fn=_limit_nproc,
         )
     except OSError as exc:
         emit("phase_end", phase=name, exit_code=None, error=str(exc), seconds=0)
@@ -475,6 +520,7 @@ def main():
          hostname=os.uname().nodename,
          secret_env=[k for k in os.environ if "VULTR" in k or k.endswith("_API_KEY")])
     decoy_paths = plant_decoys(job["decoys"])
+    LIMITS.update({k: int(v) for k, v in (job.get("limits") or {}).items() if k in LIMITS})
 
     stop = threading.Event()
     stats = {"pids_peak": 0, "procs_total": 0}
