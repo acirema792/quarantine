@@ -102,7 +102,7 @@ def probe_host_firewall():
         net = _create_network(c, "fwprobe" + new_run_id()[:5], labels)
         box = c.containers.run(settings.proxy_image, entrypoint=["python3", "-c", PROBE_SCRIPT], detach=True,
                                network=net.name, labels=labels, read_only=True, cap_drop=["ALL"],
-                               security_opt=["no-new-privileges"], mem_limit="64m", pids_limit=16,
+                               security_opt=["no-new-privileges"], mem_limit="256m", pids_limit=128,
                                runtime=resolve_runtime())
         box.wait(timeout=30)
         data = json.loads(box.logs(stdout=True, stderr=False).decode().strip().splitlines()[-1])

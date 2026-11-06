@@ -183,7 +183,6 @@ if ! command -v caddy >/dev/null; then
   curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VER}/caddy_${CADDY_VER}_linux_${ARCH}.tar.gz" \
     | tar -xz -C /usr/local/bin caddy
   chmod 755 /usr/local/bin/caddy
-  id caddy >/dev/null 2>&1 || useradd --system --home /var/lib/caddy --create-home --shell /usr/sbin/nologin caddy
   mkdir -p /etc/caddy
   cat > /etc/systemd/system/caddy.service <<'EOF'
 [Unit]
@@ -192,14 +191,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=caddy
-Group=caddy
 ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
 ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
@@ -221,8 +218,9 @@ $DOMAIN {
   }
 }
 EOF
-systemctl enable --now caddy
-systemctl reload caddy || systemctl restart caddy
+/usr/local/bin/caddy validate --config /etc/caddy/Caddyfile 2>&1 | tail -3 || true
+systemctl enable caddy
+systemctl restart caddy || { journalctl -u caddy -n 25 --no-pager | grep -viE 'token|key' ; true; }
 ufw allow 80/tcp >/dev/null 2>&1 || true
 ufw allow 443/tcp >/dev/null 2>&1 || true
 
