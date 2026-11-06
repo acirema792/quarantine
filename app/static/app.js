@@ -30,7 +30,7 @@ function rich(node, ...parts) {
 const TRUSTED_SOURCES = { sandbox: "sandbox", proxy: "proxy", engine: "engine", pipeline: "pipeline", vultr: "vultr" };
 const SANDBOX_TYPES = new Set(["runner_start", "decoys_planted", "decoy_read", "proc", "net_attempt", "phase_start",
   "phase_end", "output", "mcp_tool", "mcp_call", "fs_change", "lingering_killed", "runner_done", "runner_error",
-  "monitor_warning", "telemetry_anomaly", "raw"]);
+  "monitor_warning", "telemetry_anomaly", "raw", "resource_exhausted"]);
 let health = null;
 let current = null; // { id, es, state }
 
@@ -313,6 +313,10 @@ function handle(ev) {
     default:
       if (ev.type === "telemetry_anomaly" || ev.type === "telemetry_truncated") {
         logLine(ev, `TELEMETRY ${ev.type === "telemetry_truncated" ? "flood truncated" : ev.detail}`, true);
+      } else if (ev.type === "resource_exhausted") {
+        logLine(ev, ev.resource === "processes"
+          ? `GUARD process explosion: ${ev.count} processes (budget ${ev.cap}), tree killed`
+          : `GUARD memory balloon: ${ev.rss_mb} MB (cap ${ev.cap_mb} MB), package killed`, true);
       } else if (ev.type === "registry_locked") {
         logLine(ev, "registry access locked: install finished");
       } else if (!["runner_start", "decoys_planted", "runner_done", "assessment", "explanation", "receipt", "run_done", "raw", "lingering_killed"].includes(ev.type)) {

@@ -40,7 +40,7 @@ LOG_CONFIG = {"type": "json-file", "config": {"max-size": "5m", "max-file": "1"}
 # Event types each source may emit. Anything else is treated as tampering evidence.
 SANDBOX_TYPES = {"runner_start", "decoys_planted", "decoy_read", "proc", "net_attempt", "phase_start",
                  "phase_end", "output", "mcp_tool", "mcp_call", "fs_change", "lingering_killed",
-                 "runner_done", "runner_error", "monitor_warning"}
+                 "runner_done", "runner_error", "monitor_warning", "resource_exhausted"}
 PROXY_TYPES = {"egress"}
 
 _client = None
@@ -51,6 +51,20 @@ def client():
     if _client is None:
         _client = docker.from_env(timeout=60)
     return _client
+
+
+def mem_mb(limit: str) -> int:
+    """'1g' / '768m' / '512k' -> MB."""
+    v = str(limit).strip().lower()
+    mult = {"g": 1024, "m": 1, "k": 1 / 1024}.get(v[-1:], None)
+    return int(float(v[:-1]) * mult) if mult else int(int(v) / 1048576)
+
+
+def host_pids_limit(runtime: str) -> int:
+    """Under gVisor the container's pids cgroup also counts the sandbox kernel's own threads,
+    so the package's process budget is enforced inside the sandbox (RLIMIT_NPROC + the
+    runner's guard) and the cgroup gets headroom that only a sentry crash could use."""
+    return max(settings.pids_limit * 4, 1024) if runtime == "runsc" else settings.pids_limit
 
 
 def resolve_runtime():
@@ -269,7 +283,8 @@ def containment_proof(attrs, runtime, net_attrs):
         "memory_mb": round((hc.get("Memory") or 0) / 1048576),
         "memory_swap_mb": round((hc.get("MemorySwap") or 0) / 1048576),
         "cpus": (hc.get("NanoCpus") or 0) / 1e9,
-        "pids_limit": hc.get("PidsLimit"),
+        "pids_limit": settings.pids_limit,      # the package's budget (enforced in-sandbox too)
+        "host_pids_limit": hc.get("PidsLimit"),
         "tmpfs": hc.get("Tmpfs"),
         "mounts": [{"dst": m.get("Destination"), "rw": m.get("RW")} for m in attrs.get("Mounts") or []],
         "docker_socket_mounted": any("docker.sock" in (m.get("Source") or "") for m in attrs.get("Mounts") or []),
@@ -345,7 +360,7 @@ def detonate(run_id: str, jobdir: Path, job: dict, on_event, allow_hosts, canari
                 "/work": f"rw,nosuid,nodev,exec,size=384m,uid={SANDBOX_UID},gid={SANDBOX_UID},mode=0755",
             },
             mem_limit=settings.mem_limit, memswap_limit=settings.mem_limit,
-            nano_cpus=settings.nano_cpus, pids_limit=settings.pids_limit,
+            nano_cpus=settings.nano_cpus, pids_limit=host_pids_limit(runtime),
             cap_drop=["ALL"], cap_add=RUNNER_CAPS, security_opt=["no-new-privileges"], init=True,
             ulimits=[Ulimit(name="nofile", soft=1024, hard=1024)],
         )

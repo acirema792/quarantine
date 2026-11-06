@@ -112,3 +112,21 @@ def test_blocked_hosts_alone_never_convict():
 def test_leftover_daemon_is_scored():
     a = assess([{"type": "lingering_killed", "phase": "install", "processes": 1}])
     assert any(s["kind"] == "daemon" for s in a["signals"])
+
+
+def test_in_sandbox_guard_reports_fork_bomb_as_malicious():
+    a = assess([{"type": "runner_start", "attempt": 0},
+                {"type": "resource_exhausted", "resource": "processes", "count": 231, "cap": 256, "phase": "install"},
+                {"type": "runner_done", "attempt": 0, "stats": {"pids_peak": 240, "procs_total": 231}}])
+    assert a["verdict"] == "MALICIOUS"
+    assert any("Process explosion" in s["title"] for s in a["signals"])
+
+
+def test_gvisor_sentry_crash_is_reported_as_resource_exhaustion():
+    det = dict(BASE_DET, runtime="runsc", exit_code=2)
+    a = evidence.assess([{"type": "runner_start", "attempt": 0},
+                         {"type": "phase_start", "phase": "install", "attempt": 0}],
+                        [], det, ["registry.npmjs.org"], 256)
+    titles = [s["title"] for s in a["signals"]]
+    assert "Sandbox kernel killed by resource exhaustion" in titles
+    assert a["verdict"] != "CLEAN"

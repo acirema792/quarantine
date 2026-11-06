@@ -391,7 +391,8 @@ def _detonate_once(run, t, plan, rundir, attempt):
     decoys = _decoys()
     job = {"run_id": run.id, "ecosystem": t.ecosystem, "package_file": f"/job/{t.archive_name}",
            "decoys": decoys, "harness": harness, "mcp_command": t.mcp_command,
-           "timeouts": {"install": 60, "exercise": 25, "mcp": 25}}
+           "timeouts": {"install": 60, "exercise": 25, "mcp": 25},
+           "limits": {"nproc": settings.pids_limit, "mem_mb": sandbox.mem_mb(settings.mem_limit)}}
     allow = _allow_hosts(t.ecosystem)
     policydir = rundir / f"policy{attempt}"
     locked = []
