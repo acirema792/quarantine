@@ -78,24 +78,78 @@ def list_fixtures():
     return out
 
 
+# What people actually paste: install commands, runner commands and registry links.
+_CMD_PREFIXES = [
+    (re.compile(r"^(?:npm\s+(?:install|i|add)|pnpm\s+(?:add|install|i)|yarn\s+add|bun\s+add|npx|pnpx|bunx|"
+                r"pnpm\s+dlx|yarn\s+dlx)\s+", re.I), "npm"),
+    (re.compile(r"^(?:(?:python3?\s+-m\s+)?pip3?\s+install|uv\s+pip\s+install|uv\s+add|uvx|pipx\s+(?:run|install)|"
+                r"poetry\s+add)\s+", re.I), "pypi"),
+]
+_URLS = [
+    (re.compile(r"^https?://(?:www\.)?npmjs\.com/package/((?:@[^/\s]+/)?[^/\s?#]+)(?:/v/([^/\s?#]+))?", re.I), "npm"),
+    (re.compile(r"^https?://(?:www\.)?pypi\.org/project/([^/\s?#]+)(?:/([^/\s?#]+))?", re.I), "pypi"),
+]
+_RANGE = re.compile(r"^[\^~<>=*]|[<>]|\|\||\s-\s|\.x$|^x$", re.I)
+EXAMPLES = "e.g. left-pad@1.3.0, npm:@modelcontextprotocol/server-everything, pypi:requests==2.32.3"
+
+
+def _normalize(spec: str):
+    """Turn a pasted command or registry link into (ecosystem or None, rest)."""
+    for rx, eco in _URLS:
+        m = rx.match(spec)
+        if m:
+            name, ver = m.group(1), m.group(2)
+            return eco, name + ((("@" if eco == "npm" else "==") + ver) if ver else "")
+    for rx, eco in _CMD_PREFIXES:
+        m = rx.match(spec)
+        if m:
+            words = [w for w in spec[m.end():].split() if not w.startswith("-")]  # drop -y, -g, --save-dev …
+            if len(words) != 1:
+                raise TargetError(f"inspect one package at a time ({EXAMPLES})")
+            return eco, words[0]
+    parts = spec.split()
+    if len(parts) == 2 and VER_RE.match(parts[1]) and parts[1][0].isdigit():  # "left-pad 1.3.0"
+        return None, parts[0] + "\0" + parts[1]
+    return None, spec
+
+
 def parse_spec(spec: str):
     spec = spec.strip()
     if spec.startswith("fixture:"):
         return "fixture", spec[8:], ""
-    eco = "npm"
-    if ":" in spec:
-        eco, spec = spec.split(":", 1)
-        eco = eco.lower()
-    if eco not in ("npm", "pypi"):
-        raise TargetError("ecosystem must be npm or pypi")
+    if not spec:
+        raise TargetError(f"type a package name ({EXAMPLES})")
+    eco, spec = _normalize(spec)
+    if eco is None:
+        eco = "npm"
+        m = re.match(r"^(npm|pypi|pip|pip3|python|py)\s*:", spec, re.I)
+        if m:
+            eco = "pypi" if m.group(1).lower() != "npm" else "npm"
+            spec = spec[m.end():].strip()
+        elif re.match(r"^[a-z][\w+.-]*:", spec, re.I):
+            raise TargetError(f"only npm and PyPI packages are supported ({EXAMPLES})")
     version = ""
-    if eco == "pypi" and "==" in spec:
-        spec, version = spec.split("==", 1)
-    elif eco == "npm" and spec.rfind("@") > 0:
+    if "\0" in spec:
+        spec, version = spec.split("\0", 1)
+    elif eco == "pypi":
+        m = re.match(r"^([^=<>!~\[\s]+)(?:\[[^\]]*\])?\s*(==|===|>=|<=|~=|!=|>|<)?\s*(.*)$", spec)
+        if m:
+            spec, op, rest = m.group(1), m.group(2), m.group(3).strip()
+            if op and op not in ("==", "==="):
+                raise TargetError(f"use an exact version: {spec}=={rest.lstrip('=') or '1.0.0'} "
+                                  "(Quarantine detonates one exact release)")
+            version = rest
+    elif spec.rfind("@") > 0:
         i = spec.rfind("@")
         spec, version = spec[:i], spec[i + 1:]
-    if not NAME_RE.match(spec) or (version and not VER_RE.match(version)):
-        raise TargetError("invalid package name or version")
+        if version and _RANGE.search(version):
+            exact = re.sub(r"^[\^~>=<v\s]+", "", version)
+            raise TargetError(f"use an exact version or a tag: {spec}@{exact or 'latest'} "
+                              "(Quarantine detonates one exact release, not a range)")
+    if not NAME_RE.match(spec):
+        raise TargetError(f"that doesn't look like a package name ({EXAMPLES})")
+    if version and not VER_RE.match(version):
+        raise TargetError(f"invalid version '{version[:40]}' ({EXAMPLES})")
     return eco, spec, version
 
 
