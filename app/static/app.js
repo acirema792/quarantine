@@ -76,7 +76,7 @@ async function loadFixtures() {
     const li = el("li");
     const b = el("button");
     b.type = "button";
-    b.append(el("span", "fx-title", FIXTURE_TITLES[f.name] || f.description), el("span", "fx-name", `sample ${f.ecosystem} package: ${f.name}`));
+    b.append(el("span", "fx-title", FIXTURE_TITLES[f.name] || f.description), el("span", "fx-name", f.name));
     b.addEventListener("click", () => submit(f.spec));
     li.append(b);
     ul.append(li);
