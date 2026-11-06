@@ -151,7 +151,7 @@ OpenAPI docs are at `/docs`.
 
 ## Tests
 
-`make test` runs 74 tests. The end-to-end tests drive real Docker sandboxes through the full pipeline against a scripted OpenAI-compatible mock of Vultr Inference (`tests/mock_inference.py`). They cover:
+`make test` runs 87 tests. The end-to-end tests drive real Docker sandboxes through the full pipeline against a scripted OpenAI-compatible mock of Vultr Inference (`tests/mock_inference.py`). They cover:
 
 - the verdict for every fixture
 - containment invariants read from `docker inspect` (internal network, read-only rootfs, caps dropped, no real secrets in env, no docker.sock, swap disabled, pid cap, teardown verified)
