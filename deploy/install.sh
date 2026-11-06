@@ -163,9 +163,34 @@ systemctl restart quarantine
 log "Caddy (automatic HTTPS)"
 pkill -f "http.server 80" || true  # hand port 80 to Caddy
 if ! command -v caddy >/dev/null; then
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
-  $APT update && $APT install caddy >/dev/null
+  # Official release binary from GitHub (the apt repo's signing key rotates and broke first boot).
+  CADDY_VER=2.8.4
+  ARCH=$(dpkg --print-architecture)
+  curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VER}/caddy_${CADDY_VER}_linux_${ARCH}.tar.gz" \
+    | tar -xz -C /usr/local/bin caddy
+  chmod 755 /usr/local/bin/caddy
+  id caddy >/dev/null 2>&1 || useradd --system --home /var/lib/caddy --create-home --shell /usr/sbin/nologin caddy
+  mkdir -p /etc/caddy
+  cat > /etc/systemd/system/caddy.service <<'EOF'
+[Unit]
+Description=Caddy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
 fi
 IP=$(curl -fsS http://169.254.169.254/v1/interfaces/0/ipv4/address 2>/dev/null || curl -fsS https://api.ipify.org)
 DOMAIN="${DOMAIN:-${IP//./-}.sslip.io}"
