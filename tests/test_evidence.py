@@ -130,3 +130,14 @@ def test_gvisor_sentry_crash_is_reported_as_resource_exhaustion():
     titles = [s["title"] for s in a["signals"]]
     assert "Sandbox kernel killed by resource exhaustion" in titles
     assert a["verdict"] != "CLEAN"
+
+
+def test_gvisor_cgroup_pids_do_not_count_as_a_fork_bomb():
+    # Under runsc the cgroup also counts the sandbox kernel's threads: an honest package
+    # with 4 processes must not be flagged because the sentry had 230 threads.
+    det = dict(BASE_DET, runtime="runsc", exit_code=0)
+    a = evidence.assess([{"type": "runner_start", "attempt": 0},
+                         {"type": "stats", "peak_pids": 230, "peak_mem_mb": 80},
+                         {"type": "runner_done", "attempt": 0, "stats": {"pids_peak": 4, "procs_total": 3}}],
+                        [], det, ["registry.npmjs.org"], 256)
+    assert a["verdict"] == "CLEAN", a["signals"]

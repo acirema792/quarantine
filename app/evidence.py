@@ -56,6 +56,7 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
                     "source": source})
 
     decoys, denied, canary_hosts, allowed, locked_hits = set(), {}, set(), {}, set()
+    guard_tripped = False
     big_tunnels, held_open = [], set()
     stats = {}
     done_attempts, started_attempts, anomalies = set(), set(), []
@@ -82,6 +83,7 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
         elif t in ("telemetry_anomaly", "telemetry_truncated", "runner_error"):
             anomalies.append(ev)
         elif t == "resource_exhausted":
+            guard_tripped = guard_tripped or ev.get("resource") == "processes"
             if ev.get("resource") == "processes":
                 add("critical", "resource_exhaustion",
                     f"Process explosion: {ev.get('count')} processes during {ev.get('phase')} (budget {ev.get('cap')})",
@@ -166,11 +168,14 @@ def assess(events, static_findings, det, allow_hosts, pids_limit):
         add("high", "telemetry_tampering", "Sandbox runner never reported in",
             "No runner_start event: the sandbox failed or its output was suppressed.", "ASI10")
 
-    peak_pids = max(stats.get("pids_peak", 0), stats.get("peak_pids_cgroup", 0))
-    if peak_pids >= int(pids_limit * 0.85) or stats.get("procs_total", 0) > 500:
+    # Under gVisor the container cgroup also counts the sandbox kernel's own threads, so only
+    # the runner's in-sandbox process count is meaningful there.
+    gvisor = det.get("runtime") == "runsc"
+    peak_pids = max(stats.get("pids_peak", 0), 0 if gvisor else stats.get("peak_pids_cgroup", 0))
+    if not guard_tripped and (peak_pids >= int(pids_limit * 0.85) or stats.get("procs_total", 0) > 500):
         add("critical", "resource_exhaustion",
-            f"Process explosion: {stats.get('procs_total', peak_pids)} processes spawned (cap {pids_limit})",
-            "Fork-bomb behaviour contained by the pids cgroup limit.", "ASI08")
+            f"Process explosion: {max(peak_pids, stats.get('procs_total', 0))} processes (cap {pids_limit})",
+            "Fork-bomb behaviour contained by the process limit.", "ASI08")
     if det.get("runtime") == "runsc" and det.get("exit_code") == 2 and missing:
         # gVisor's sentry is a Go program: exit 2 is a Go fatal error, i.e. the sandbox kernel
         # itself ran out of threads or memory. Packages cannot cause that by being slow.

@@ -198,12 +198,15 @@ def _hex_to_addr(h):
 
 
 LIMITS = {"nproc": 0, "mem_mb": 0}  # set from the job: the package's process and memory budget
-GUARD = {"processes": False, "memory": False}
+GUARD = {"processes": False, "memory": False, "phase": None}
 
 
-def _limit_nproc():  # runs in the child before exec: the package uid may own at most `nproc` processes
+def _limit_nproc():
+    """Runs in the child before exec. RLIMIT_NPROC counts threads too (node alone has ~10), so
+    the kernel limit is a backstop at twice the budget; the guard trips first, on processes."""
     if LIMITS["nproc"]:
-        resource.setrlimit(resource.RLIMIT_NPROC, (LIMITS["nproc"], LIMITS["nproc"]))
+        lim = LIMITS["nproc"] * 2
+        resource.setrlimit(resource.RLIMIT_NPROC, (lim, lim))
 
 
 def _rss_mb(pid):
@@ -224,6 +227,9 @@ def resource_guard(pids, stats):
     stats["dev_pids_peak"] = max(stats.get("dev_pids_peak", 0), len(dev))
     if not dev:
         return
+    if GUARD.get("phase") == CURRENT_PHASE[0]:  # already tripped this phase: keep it down
+        kill_package_processes(rounds=3)
+        return
     cap, mem_cap = LIMITS["nproc"], LIMITS["mem_mb"]
     hits = []
     if cap and not GUARD["processes"] and len(dev) >= int(cap * 0.9):
@@ -237,6 +243,7 @@ def resource_guard(pids, stats):
         GUARD[h["resource"]] = True
         emit("resource_exhausted", phase=CURRENT_PHASE[0], **h)
     if hits:
+        GUARD["phase"] = CURRENT_PHASE[0]
         kill_package_processes(rounds=20)
 
 
