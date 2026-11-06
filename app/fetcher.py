@@ -191,7 +191,7 @@ def _resolve_npm(client, name, version):
     meta_url = f"https://registry.npmjs.org/{name.replace('/', '%2F')}"
     r = client.get(meta_url)
     if r.status_code == 404:
-        raise TargetError(f"npm package '{name}' not found")
+        raise TargetError(f"npm package '{name}' not found on registry.npmjs.org; check the spelling")
     r.raise_for_status()
     meta = r.json()
     tags = meta.get("dist-tags", {})
@@ -212,7 +212,7 @@ def _resolve_pypi(client, name, version):
     url = f"https://pypi.org/pypi/{name}/{version}/json" if version else f"https://pypi.org/pypi/{name}/json"
     r = client.get(url)
     if r.status_code == 404:
-        raise TargetError(f"PyPI package '{name}' not found")
+        raise TargetError(f"PyPI package '{name}' not found on pypi.org; check the spelling")
     r.raise_for_status()
     meta = r.json()
     version = meta["info"]["version"]

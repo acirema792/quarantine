@@ -129,7 +129,7 @@ curl "https://<host>/api/gate?ecosystem=npm&name=color-utils-pro&version=4.2.1"
 # Decisions are per exact version; without a version the gate answers "unknown".
 
 export QUARANTINE_URL=https://<host>
-deploy/qnpm install left-padder@2.0.3   # resolves the exact version, unknown → detonate → install only if CLEAN
+deploy/qnpm install left-pad@1.3.0      # resolves the exact version, unknown → detonate → install only if CLEAN
 ```
 
 Approving or blocking a **real** package requires the admin token that `install.sh` generates and prints. Sample shipments stay open, and their decisions live in a separate `fixture-npm` namespace, so anyone can try the approval flow on the public demo without changing real policy. `qnpm` also checks that the registry still serves the exact bytes (sha512 integrity) that were approved, and `qnpm ci` refuses a lockfile containing anything not cleared.
@@ -151,7 +151,7 @@ OpenAPI docs are at `/docs`.
 
 ## Tests
 
-`make test` runs 87 tests. The end-to-end tests drive real Docker sandboxes through the full pipeline against a scripted OpenAI-compatible mock of Vultr Inference (`tests/mock_inference.py`). They cover:
+`make test` runs 88 tests. The end-to-end tests drive real Docker sandboxes through the full pipeline against a scripted OpenAI-compatible mock of Vultr Inference (`tests/mock_inference.py`). They cover:
 
 - the verdict for every fixture
 - containment invariants read from `docker inspect` (internal network, read-only rootfs, caps dropped, no real secrets in env, no docker.sock, swap disabled, pid cap, teardown verified)
