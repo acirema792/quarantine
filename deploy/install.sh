@@ -49,8 +49,22 @@ $APT update
 $APT install ca-certificates curl gnupg git python3-venv python3-pip openssl debian-keyring debian-archive-keyring apt-transport-https >/dev/null
 
 log "Docker Engine"
+# get.docker.com's apt calls don't wait for the dpkg lock, and first boot's unattended-upgrades
+# holds it: stop that service, wait until no package manager is running, and retry.
+wait_apt() {
+  for _ in $(seq 1 180); do
+    pgrep -x 'apt|apt-get|dpkg|unattended-upgr' >/dev/null 2>&1 || return 0
+    sleep 5
+  done
+}
+systemctl stop unattended-upgrades >/dev/null 2>&1 || true
 if ! command -v docker >/dev/null; then
-  curl -fsSL https://get.docker.com | sh
+  for i in 1 2 3 4; do
+    wait_apt
+    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && sh /tmp/get-docker.sh && break
+    echo "docker install attempt $i failed; retrying"; sleep 15
+  done
+  command -v docker >/dev/null || { echo "FATAL: docker install failed"; exit 1; }
 fi
 systemctl enable --now docker
 
