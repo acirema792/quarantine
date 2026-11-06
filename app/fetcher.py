@@ -251,9 +251,22 @@ def resolve(spec: str, workdir: Path) -> Target:
         if not settings.allow_registry_targets:
             raise TargetError("registry targets are disabled on this deployment")
         eco = kind
+        # A bare name ("requests", "left-pad 1.3.0") names no ecosystem: try npm, then PyPI.
+        bare = ":" not in spec and not any(rx.match(spec.strip()) for rx, _ in _CMD_PREFIXES)
         with httpx.Client(timeout=30, follow_redirects=True, headers={"User-Agent": "quarantine-scanner/1.0"}) as client:
             if eco == "npm":
-                version, data, src_url, integrity, ok, archive_name = _resolve_npm(client, name, version)
+                try:
+                    version, data, src_url, integrity, ok, archive_name = _resolve_npm(client, name, version)
+                except TargetError as exc:
+                    if not (bare and "not found on registry.npmjs.org" in str(exc)):
+                        raise
+                    eco = "pypi"
+                    try:
+                        version, data, src_url, integrity, ok, archive_name = _resolve_pypi(client, name, version)
+                    except TargetError as exc2:
+                        if "not found on pypi.org" in str(exc2):
+                            raise TargetError(f"'{name}' was found on neither npm nor PyPI; check the spelling") from None
+                        raise
             else:
                 version, data, src_url, integrity, ok, archive_name = _resolve_pypi(client, name, version)
         source = "registry"

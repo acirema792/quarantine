@@ -104,3 +104,26 @@ def test_unusable_specs_get_actionable_errors(raw, hint):
     with pytest.raises(fetcher.TargetError) as e:
         fetcher.parse_spec(raw)
     assert hint in str(e.value)
+
+
+def test_bare_name_falls_back_to_pypi(monkeypatch, tmp_path):
+    calls = []
+
+    def npm(client, name, version):
+        calls.append("npm")
+        raise fetcher.TargetError(f"npm package '{name}' not found on registry.npmjs.org; check the spelling")
+
+    def pypi(client, name, version):
+        calls.append("pypi")
+        raise fetcher.TargetError(f"PyPI package '{name}' not found on pypi.org; check the spelling")
+
+    monkeypatch.setattr(fetcher, "_resolve_npm", npm)
+    monkeypatch.setattr(fetcher, "_resolve_pypi", pypi)
+    monkeypatch.setattr(fetcher.settings, "allow_registry_targets", True)
+    with pytest.raises(fetcher.TargetError, match="neither npm nor PyPI"):
+        fetcher.resolve("no-such-pkg-xyz", tmp_path)
+    assert calls == ["npm", "pypi"]
+    calls.clear()
+    with pytest.raises(fetcher.TargetError, match="registry.npmjs.org"):
+        fetcher.resolve("npm:no-such-pkg-xyz", tmp_path)  # explicit ecosystem: no fallback
+    assert calls == ["npm"]
