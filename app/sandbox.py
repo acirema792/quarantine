@@ -132,8 +132,10 @@ def host_firewall(ensure=False):
     if os.geteuid() != 0 or not ipt:
         # Non-root service: the rule is installed by deploy/firewall.sh (ExecStartPre=+, as root),
         # which leaves this marker; we cannot run iptables -C ourselves.
-        if marker.exists():
+        try:
             return {"active": True, "rule": marker.read_text().strip(), "via": "deploy/firewall.sh"}
+        except OSError:
+            pass
         return {"active": False, "reason": "iptables unavailable to this user and no firewall marker"}
     try:
         check = subprocess.run([ipt, "-C", *_fw_rule()], capture_output=True, timeout=10)
