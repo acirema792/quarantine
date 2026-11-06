@@ -98,15 +98,20 @@ class RunIn(BaseModel):
 
 @app.post("/api/runs")
 def create_run(body: RunIn, req: Request):
+    spec = body.spec.strip()
+    # A bare sample-shipment name (as shown in the sidebar) means that sample, not a registry
+    # package that does not exist. An explicit "npm:"/"pypi:" prefix still goes to the registry.
+    if spec in {f["name"] for f in fetcher.list_fixtures() if not f.get("hidden")}:
+        spec = f"fixture:{spec}"
     try:
-        fetcher.parse_spec(body.spec)
+        fetcher.parse_spec(spec)
     except fetcher.TargetError as exc:
         raise HTTPException(400, str(exc))
     ip = _client_ip(req)
     if store.recent_client_runs(ip, time.time() - 3600) >= settings.rate_limit_per_hour:
         raise HTTPException(429, "rate limit: too many scans from your address this hour")
     try:
-        return {"id": agent.start(body.spec, ip)}
+        return {"id": agent.start(spec, ip)}
     except agent.QueueFull as exc:
         raise HTTPException(503, str(exc))
 

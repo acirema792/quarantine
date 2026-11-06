@@ -119,3 +119,11 @@ def test_no_admin_token_refuses_real_decisions(client, monkeypatch):
     monkeypatch.setattr(settings, "allow_open_decisions", False)
     rid = fake_done_run(source="registry", name="pub-pkg")
     assert client.post(f"/api/runs/{rid}/decision", json={"decision": "approve"}).status_code == 403
+
+
+def test_bare_sample_name_runs_the_sample_not_the_registry(client, monkeypatch):
+    seen = []
+    monkeypatch.setattr(agent, "start", lambda spec, ip: seen.append(spec) or "ok")
+    assert client.post("/api/runs", json={"spec": " left-padder "}).status_code == 200
+    assert client.post("/api/runs", json={"spec": "npm:left-padder"}).status_code == 200
+    assert seen == ["fixture:left-padder", "npm:left-padder"]  # an explicit prefix still means the registry

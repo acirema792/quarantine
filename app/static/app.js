@@ -65,7 +65,7 @@ async function loadHealth() {
   if (e.ok && !e.gvisor) notes.push("gVisor is not installed on this host; sandboxes run under the default runc runtime with the other controls still applied.");
   if (!e.ok) notes.push("Docker engine unreachable: detonations will fail until it is back.");
   if (notes.length) { $("#banner").textContent = notes.join(" "); $("#banner").hidden = false; }
-  $("#gate-snippet").textContent = `curl "${location.origin}/api/gate?ecosystem=npm&name=left-padder"`;
+  $("#gate-snippet").textContent = `curl "${location.origin}/api/gate?ecosystem=npm&name=left-pad&version=1.3.0"`;
 }
 
 async function loadFixtures() {
@@ -76,7 +76,7 @@ async function loadFixtures() {
     const li = el("li");
     const b = el("button");
     b.type = "button";
-    b.append(el("span", "fx-title", FIXTURE_TITLES[f.name] || f.description), el("span", "fx-name", `${f.ecosystem}: ${f.name}`));
+    b.append(el("span", "fx-title", FIXTURE_TITLES[f.name] || f.description), el("span", "fx-name", `sample ${f.ecosystem} package: ${f.name}`));
     b.addEventListener("click", () => submit(f.spec));
     li.append(b);
     ul.append(li);
