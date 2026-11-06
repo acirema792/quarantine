@@ -173,6 +173,7 @@ OpenAPI docs are at `/docs`.
 ## Limits and honest notes
 
 - In-sandbox telemetry is best effort. Determined malware can evade or fake it, which is why the verdict leans on out-of-sandbox signals.
+- One VM runs two detonations at a time (`MAX_CONCURRENT_RUNS`); more load needs a pool of sandbox VMs (the planned next step).
 - Time bombs and environment-keyed malware (e.g. "only run on CI", "wait 3 days") may stay dormant. The harness and decoys raise the odds of triggering them but cannot guarantee it.
 - HTTPS bodies to allowlisted registries are not inspected (CONNECT tunnels). Exfil to non-allowlisted hosts is blocked regardless of content.
 - The sample shipments are self-written and target only decoys and reserved `.example` domains. Do not point the public demo at real malware.
