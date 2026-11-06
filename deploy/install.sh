@@ -119,7 +119,7 @@ python3 -m venv "$APP_DIR/.venv"
 
 log "Configuration ($ENV_FILE)"
 if [ ! -f "$ENV_FILE" ]; then
-  umask 077
+  install -m 600 /dev/null "$ENV_FILE"   # private from the first byte, without changing this script's umask
   cat > "$ENV_FILE" <<EOF
 VULTR_INFERENCE_API_KEY=${VULTR_INFERENCE_API_KEY:-}
 VULTR_MODEL=${VULTR_MODEL:-glm-5.3,deepseek-v4.1-flash-1017,qwen3.8-flash-next,mimo-v2.6-pro,glm-5.3-flash,minimax-m3.1-flash}
