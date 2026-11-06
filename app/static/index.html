@@ -26,10 +26,10 @@
       <label for="spec">Inspect a package</label>
       <div class="intake-row">
         <input id="spec" name="spec" autocomplete="off" spellcheck="false"
-               placeholder="left-pad, pip install requests, or a package link" required>
+               placeholder="left-pad or a package link" required>
         <button type="submit" id="go">Inspect</button>
       </div>
-      <p class="hint">Any npm or PyPI package, including MCP servers: type a name like left-pad, paste a command like pip install requests or npx -y …, or paste an npmjs.com / pypi.org link. A bare name is looked up on npm first, then PyPI. It is downloaded, hash-verified, then detonated in a throwaway sandbox.</p>
+      <p class="hint">Type a name like left-pad, or paste pip install requests, npx -y …, or an npmjs.com / pypi.org link. It runs in a throwaway sandbox.</p>
     </form>
 
     <section class="shipments">
