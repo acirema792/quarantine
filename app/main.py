@@ -34,6 +34,10 @@ async def security_headers(request: Request, call_next):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
     resp.headers["X-Frame-Options"] = "DENY"
+    p = request.url.path
+    if p == "/" or (p.startswith("/static/") and p.endswith((".js", ".css"))):
+        # revalidate (cheap 304 via ETag) so a deploy reaches visitors on their next load
+        resp.headers["Cache-Control"] = "no-cache"
     return resp
 
 
